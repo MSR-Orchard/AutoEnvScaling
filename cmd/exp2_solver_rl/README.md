@@ -57,7 +57,6 @@ DRY_RUN=1 cmd/exp2_solver_rl/run.sh qwen3.5-35b-a3b
 - How the initial AutoEnvScaling pool was built is not stated in the paper. The launcher
   generates `INITIAL_ENVS` (default 256, the pool size) environments with the proposer, parents
   drawn from the Tmax tasks and calibrated against the base solver.
-- The number of matched solver updates is not stated in the paper; `STEPS` defaults to the
-  preset's 300.
+- The paper's Exp 2 runs use 300 matched solver updates, the `STEPS` default.
 - Serving a Miles checkpoint as an OpenAI-compatible endpoint for evaluation is not part of this
   package.

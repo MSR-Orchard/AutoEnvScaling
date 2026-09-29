@@ -32,7 +32,7 @@ class FakeRunner:
         self.calls = []
 
     async def run(self, task_dir, agent, *, n_attempts=1, label="trial", instruction=None,
-                  public_network=False):
+                  public_network=False, allowed_hosts=()):
         self.calls.append((label, agent.name))
         outcome = self.by_label[label]
         if isinstance(outcome, Exception):
@@ -78,7 +78,8 @@ async def test_all_checks_pass_in_order(tmp_path, settings, heldout, review):
                               reviewer=REVIEWER, heldout=heldout)
     assert [c.name for c in report.checks] == [BUILD, REFERENCE, EMPTY, CONTAMINATION, RUBRIC]
     assert report.passed and runner.calls == [("reference", "oracle"), ("empty", "nop")]
-    assert review["kwargs"]["skip"] == ("binary_reward",)
+    assert review["kwargs"]["skip"] == Settings().validation.rubric_skip
+    assert "binary_reward" in review["kwargs"]["skip"] and "task_readme" in review["kwargs"]["skip"]
     assert review["kwargs"]["rubric"] == "terminal-bench"
 
 

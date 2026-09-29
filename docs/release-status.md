@@ -26,20 +26,28 @@ an author decision before the public release.
   Both roles currently train on re-tokenized conversations; exact token capture needs a proxy in
   front of the rollout router, which is not in this release.
 
-## Decisions needed from the authors
+## Author decisions (recorded 29/09/2026)
 
-1. Rubric scope: the official Terminal-Bench rubric includes contributor-metadata criteria
-   (`task_readme`, `expert_time_estimate`, `category_and_tags`, `task_name`, the
-   `*_explanation_quality` criteria, `ctrf_reporting`, `separate_verifier_configured`). The paper
-   applies every criterion except `binary_reward`. Were these also skipped in the paper's runs?
-2. Solver network during calibration: public, as in the research code (Pi installs itself and
-   calls the model endpoint from inside the task container), or an allowlist?
-3. The fraction-of-tests verifier template: inject it into every generated task in all three
+* Rubric review: `binary_reward` and the contributor-metadata criteria (`task_readme`,
+  `expert_time_estimate`, `category_and_tags`, `task_name`, the three `*_explanation_quality`
+  criteria, `ctrf_reporting`, `separate_verifier_configured`) are skipped, as in the paper's runs
+  (`ValidationSettings.rubric_skip`).
+* Solver network during calibration: allowlist. Solver attempts reach only the endpoint's host
+  and the hosts Pi installs from (`PI_INSTALL_HOSTS`), plus anything the task already allows;
+  `AES_SOLVER_NETWORK=public` opens it.
+* Blocked pages for the proposer: Terminal-Bench (`tbench.ai`) and its GitHub repositories. The
+  web tools refuse those URLs and the proposer image makes `git clone` of the repositories fail.
+* Exp 2 runs 300 solver updates.
+* Cold-Start: standard SFT with slime's recipe (the `cold-start` preset), on all 600 admitted
+  proposer trajectories that were collected; no further selection.
+* Self-play: one assignment per proposer round with 128 episodes; revisions join the first
+  attempt's group.
+* Licence: Apache License 2.0, as in MSR-Orchard/execcritic (`LICENSE`,
+  `THIRD_PARTY_NOTICES.md`).
+
+## Still open
+
+1. The fraction-of-tests verifier template: inject it into every generated task in all three
    generation arms, or only in the baselines?
-4. Web access: which benchmark pages besides Terminal-Bench were blocked for the proposer?
-5. Self-play details not stated in the paper: assignments per proposer round (default 1 x 128
-   episodes), whether revisions join the first attempt's group, and which episode's memory and
-   tools persist when episodes run concurrently.
-6. Exp 2 matched step count and learning rate; Cold-Start fine-tuning hyperparameters and the
-   "high-quality" selection rule.
-7. Licence for the public release.
+2. The copyright line in `LICENSE` is left as the Apache template; fill it in (for example,
+   Microsoft Corporation) before the public release.

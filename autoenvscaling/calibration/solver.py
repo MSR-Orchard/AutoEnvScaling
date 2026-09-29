@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 # Pi release used by the paper's solver runs (old pi_agent._PI_VERSION).
 PI_VERSION = "0.80.6"
+
+# Hosts Harbor's Pi installer reaches at the start of a trial: the nvm installer (GitHub), Node
+# (nodejs.org), the npm registry, and Debian/Ubuntu mirrors when curl is missing. Set
+# `install_hosts=()` for task images that already contain Pi, to allowlist only the endpoint.
+PI_INSTALL_HOSTS = ("raw.githubusercontent.com", "github.com", "nodejs.org",
+                    "registry.npmjs.org", "deb.debian.org", "security.debian.org",
+                    "archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com")
 HINTS_HEADER = "## Hints\nHigh-level steps toward a solution:\n"
 
 
@@ -41,9 +48,9 @@ class SolverEndpoint:
 
     ``api_key_env`` names the host environment variable that holds the endpoint's key; it is
     passed to Pi as ``OPENAI_API_KEY``. A local server that needs no key can leave it unset.
-    ``public_network`` opens the task container's network during solver attempts, because Pi
-    installs itself and calls the endpoint from inside the container (the old host did the same);
-    set it to False to keep the task's own network policy and allowlist only the endpoint's host.
+    Solver attempts run with an allowlist network: the endpoint's host plus ``install_hosts``
+    (where Pi installs itself from), added to anything the task already allows. Set
+    ``public_network=True`` (``AES_SOLVER_NETWORK=public``) to open the network instead.
     """
 
     base_url: str
@@ -53,7 +60,8 @@ class SolverEndpoint:
     model_api: str = "openai-completions"
     agent_version: str | None = PI_VERSION
     timeout_sec: float = SOLVER_TIMEOUT_SEC
-    public_network: bool = True
+    public_network: bool = False
+    install_hosts: tuple[str, ...] = PI_INSTALL_HOSTS
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -64,7 +72,16 @@ class SolverEndpoint:
         model = env.get("AES_SOLVER_MODEL", "").strip()
         if not base_url or not model:
             raise ValueError("set AES_SOLVER_BASE_URL and AES_SOLVER_MODEL for the solver endpoint")
-        return cls(base_url=base_url, model=model)
+        network = env.get("AES_SOLVER_NETWORK", "allowlist").strip().lower()
+        if network not in {"allowlist", "public"}:
+            raise ValueError(f"AES_SOLVER_NETWORK must be 'allowlist' or 'public', got {network!r}")
+        return cls(base_url=base_url, model=model, public_network=network == "public")
+
+    @property
+    def allowed_hosts(self) -> tuple[str, ...]:
+        """The hosts a solver attempt may reach under the allowlist: endpoint first, then installs."""
+        host = urlsplit(self.base_url).hostname
+        return tuple(dict.fromkeys(((host,) if host else ()) + tuple(self.install_hosts)))
 
     @property
     def harbor_model_name(self) -> str:
@@ -113,7 +130,8 @@ async def run_solver(task: HarborTask, solver: SolverEndpoint, *, n: int, harbor
     instruction = with_hints(task.instruction, hints) if hints else None
     result = await runner.run(task.path, solver.agent_spec(), n_attempts=n,
                               label="hint_probe" if hints else "solver", instruction=instruction,
-                              public_network=solver.public_network)
+                              public_network=solver.public_network,
+                              allowed_hosts=() if solver.public_network else solver.allowed_hosts)
     shown = instruction if instruction is not None else task.instruction
     return [to_trajectory(task, solver, outcome, shown) for outcome in result.outcomes]
 

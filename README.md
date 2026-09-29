@@ -151,5 +151,5 @@ tests/            unit tests (live tests need credentials: AES_LIVE_TESTS=1)
 
 ## License
 
-To be decided before the public release. Third-party components keep their own licences
-(Harbor's `create-task` skill and the Terminal-Bench rubric: Apache-2.0).
+AutoEnvScaling is released under the [Apache License 2.0](LICENSE). Third-party components
+keep their own licences; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

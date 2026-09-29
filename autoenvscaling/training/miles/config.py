@@ -77,6 +77,8 @@ class MilesConfig:
     # ---- optimizer -----------------------------------------------------------------------------
     lr: float = 1e-6
     lr_decay_style: str = "constant"
+    min_lr: float | None = None
+    lr_warmup_fraction: float | None = None
     weight_decay: float = 0.1
     adam_beta1: float = 0.9
     adam_beta2: float = 0.98
@@ -159,6 +161,10 @@ class MilesConfig:
         a += ["--optimizer", "adam", "--lr", _num(self.lr), "--lr-decay-style", self.lr_decay_style,
               "--weight-decay", _num(self.weight_decay), "--adam-beta1", _num(self.adam_beta1),
               "--adam-beta2", _num(self.adam_beta2), "--clip-grad", _num(self.clip_grad)]
+        if self.min_lr is not None:
+            a += ["--min-lr", _num(self.min_lr)]
+        if self.lr_warmup_fraction is not None:
+            a += ["--lr-warmup-fraction", _num(self.lr_warmup_fraction)]
         a += self._parallel_args()
         if self.mode != SFT:
             a += self._serving_args()
@@ -286,12 +292,14 @@ def exp2_qwen35_35b(**paths: Any) -> MilesConfig:
 def cold_start_sft(**paths: Any) -> MilesConfig:
     """Cold-Start: fine-tune Qwen3.6-35B-A3B on the proposer trajectories from `to_sft`.
 
-    The epoch count, learning rate and schedule are placeholders: the released Cold-Start
-    checkpoint was trained with a different trainer and its hyperparameters are not recorded
-    in the code this package was ported from.
+    The paper uses standard SFT: these are the settings of slime's Qwen3.5-35B-A3B SFT recipe
+    (github.com/THUDM/slime, scripts/run-qwen3.5-35B-A3B-sft.sh): 3 epochs, batch 128,
+    per-token SFT loss with the Qwen3.5 loss mask, lr 1e-5 cosine to 1e-6 with 10% warmup,
+    weight decay 0.1, Adam betas 0.9/0.98. The paper's set is all 600 proposer trajectories.
     """
-    return MilesConfig(mode=SFT, rollout_batch_size=16, num_epoch=4, lr=1e-5,
-                       lr_decay_style="cosine", save_interval=100, **paths)
+    return MilesConfig(mode=SFT, rollout_batch_size=128, num_epoch=3, lr=1e-5,
+                       lr_decay_style="cosine", min_lr=1e-6, lr_warmup_fraction=0.1,
+                       loss_mask_type="qwen3_5", save_interval=20, **paths)
 
 
 PRESETS = {"shared-policy": shared_policy,

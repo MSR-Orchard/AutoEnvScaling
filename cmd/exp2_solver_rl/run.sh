@@ -14,7 +14,7 @@
 #                   initial AutoEnvScaling pool
 #   MILES_DIR, MEGATRON_DIR                 checked by `autoenvscaling train plan`
 #   PROPOSERS       default "gpt-5.6-sol claude-opus-5"
-#   STEPS           solver updates per run (default 300, the preset's value; not stated in the paper)
+#   STEPS           solver updates per run (default 300, as in the paper's Exp 2 runs)
 #   INITIAL_ENVS    environments generated for the initial AutoEnvScaling pool (default 256)
 source "$(dirname "$0")/../common.sh"
 HERE="$(cd "$(dirname "$0")" && pwd)"

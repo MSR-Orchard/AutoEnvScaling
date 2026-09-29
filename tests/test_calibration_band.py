@@ -24,7 +24,7 @@ class ScriptedRunner:
         self.calls = []
 
     async def run(self, task_dir, agent, *, n_attempts=1, label="trial", instruction=None,
-                  public_network=False):
+                  public_network=False, allowed_hosts=()):
         rewards = self.batches.pop(0)
         assert len(rewards) == n_attempts
         self.calls.append((label, n_attempts, instruction))

@@ -180,7 +180,8 @@ class TrialRunner(Protocol):
 
     async def run(self, task_dir: Path, agent: AgentSpec, *, n_attempts: int = 1,
                   label: str = "trial", instruction: str | None = None,
-                  public_network: bool = False) -> RunResult: ...
+                  public_network: bool = False,
+                  allowed_hosts: tuple[str, ...] = ()) -> RunResult: ...
 
 
 class HarborRunner:
@@ -203,7 +204,8 @@ class HarborRunner:
 
     async def run(self, task_dir: Path, agent: AgentSpec, *, n_attempts: int = 1,
                   label: str = "trial", instruction: str | None = None,
-                  public_network: bool = False) -> RunResult:
+                  public_network: bool = False,
+                  allowed_hosts: tuple[str, ...] = ()) -> RunResult:
         from harbor.job import Job
 
         if n_attempts < 1:
@@ -211,7 +213,7 @@ class HarborRunner:
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
         run_dir = self.jobs_root / _safe_name(label) / run_id
         staged = stage_task(Path(task_dir), run_dir / "task", instruction=instruction,
-                            public_network=public_network)
+                            public_network=public_network, allowed_hosts=allowed_hosts)
         config = self._job_config(staged, agent, n_attempts=n_attempts, jobs_dir=run_dir,
                                   job_name="job")
         job = await Job.create(config)
@@ -259,16 +261,18 @@ def harbor_cli() -> str:
 
 
 def stage_task(task_dir: Path, dest: Path, *, instruction: str | None = None,
-               public_network: bool = False) -> Path:
+               public_network: bool = False, allowed_hosts: tuple[str, ...] = ()) -> Path:
     """Copy a task for one run and apply run-specific overrides to the copy only.
 
     * ``[task].name`` without an ``org/`` prefix gets ``aes/`` prepended: Harbor requires the
       ``org/name`` form, and the name is run metadata rather than part of the environment.
     * ``[environment].build_timeout_sec`` defaults to 1200 seconds when the task leaves it unset.
     * ``instruction`` replaces instruction.md (used by the hint probe).
-    * ``public_network`` opens the network for the whole trial. Pi runs inside the task container
-      and must reach the model endpoint and install itself, so solver attempts need it; the
-      reference and empty solutions run with the task's own network settings.
+    * ``allowed_hosts`` switches the trial to Harbor's allowlist network mode and adds these hosts
+      to any the task already allows. Solver attempts use it: Pi runs inside the task container
+      and must reach the model endpoint and the hosts it installs from, and nothing else.
+    * ``public_network`` opens the network for the whole trial instead (opt-in).
+    The reference and empty solutions run with the task's own network settings.
     """
     task_dir = Path(task_dir)
     if dest.exists():
@@ -288,6 +292,12 @@ def stage_task(task_dir: Path, dest: Path, *, instruction: str | None = None,
         if isinstance(agent_section, dict):
             agent_section.pop("network_mode", None)
             agent_section.pop("allowed_hosts", None)
+    elif allowed_hosts:
+        existing = (environment.get("allowed_hosts") or []
+                    if environment.get("network_mode") == "allowlist" else [])
+        environment["network_mode"] = "allowlist"
+        environment["allowed_hosts"] = sorted(set(existing) | set(allowed_hosts))
+        environment.pop("allow_internet", None)
     config_path.write_text(tomli_w.dumps(config))
     if instruction is not None:
         (dest / "instruction.md").write_text(instruction)

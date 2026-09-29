@@ -146,3 +146,30 @@ def test_build_log_tail_includes_error_and_trial_log(tmp_path):
                          exception_message="Image build failed", failed_phase="environment")
     text = H.build_log_tail(out)
     assert "ImageBuildError: Image build failed" in text and "nosuchpkg" in text
+
+
+def test_stage_task_allowlist_merges_task_hosts(tmp_path):
+    import tomllib
+
+    from autoenvscaling.validation.harbor_runner import stage_task
+
+    def staged_env(task_env: dict, **kwargs) -> dict:
+        src = tmp_path / f"src{len(list(tmp_path.iterdir()))}"
+        (src / "environment").mkdir(parents=True)
+        lines = ['[task]\nname = "demo"\n', "[environment]\n"]
+        for key, value in task_env.items():
+            lines.append(f"{key} = {value!r}\n".replace("'", '"'))
+        (src / "task.toml").write_text("".join(lines))
+        dest = stage_task(src, tmp_path / (src.name + "-staged"), **kwargs)
+        return tomllib.loads((dest / "task.toml").read_text())["environment"]
+
+    # A task that already allowlists hosts keeps them, plus the solver's.
+    env = staged_env({"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
+                     allowed_hosts=("solver.test", "registry.npmjs.org"))
+    assert env["network_mode"] == "allowlist"
+    assert env["allowed_hosts"] == ["pypi.org", "registry.npmjs.org", "solver.test"]
+    # A public task is narrowed to the solver's hosts.
+    env = staged_env({"network_mode": "public"}, allowed_hosts=("solver.test",))
+    assert env["network_mode"] == "allowlist" and env["allowed_hosts"] == ["solver.test"]
+    # Without allowed_hosts the task's own policy is untouched.
+    assert staged_env({"network_mode": "public"})["network_mode"] == "public"

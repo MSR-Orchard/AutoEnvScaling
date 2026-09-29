@@ -36,7 +36,15 @@ class ValidationSettings:
     # Terminal-Bench 2.1 and 4.0, as in the paper's decontamination appendix.
     heldout_dataset: str = "terminal-bench/terminal-bench-2-1,terminal-bench/terminal-bench@4.0.0"
     rubric: str = "terminal-bench"      # rubric used by `harbor check`
-    rubric_skip: tuple[str, ...] = ("binary_reward",)  # our tests give partial credit
+    # Criteria skipped in the rubric review, as in the paper's runs: binary_reward (our tests
+    # give partial credit) and the contributor-metadata criteria, which generated tasks do not
+    # carry (a README, time estimates, tags, explanations, CTRF reporting, a separate verifier).
+    rubric_skip: tuple[str, ...] = (
+        "binary_reward",
+        "task_readme", "expert_time_estimate", "category_and_tags", "task_name",
+        "difficulty_explanation_quality", "solution_explanation_quality",
+        "verification_explanation_quality", "ctrf_reporting", "separate_verifier_configured",
+    )
     # The rubric review is graded by the proposer's own model. Leave these empty to use the
     # proposer's harness and model; set them to pin a reviewer (e.g. for baselines).
     reviewer_agent: str = ""

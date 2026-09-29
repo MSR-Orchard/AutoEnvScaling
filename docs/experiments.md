@@ -48,7 +48,7 @@ yet"; **not released** means neither code nor underlying runs are part of this r
 | Table 12 | Self-play training settings | `cmd/exp3_self_play` | `cmd/exp3_self_play/config.toml` | `paper_tables.json` | | checked by tests against the package defaults |
 | Figure 20 | Proposer validity during self-play | `cmd/exp3_self_play` | same | `fig_proposer_validity_data.json` | `outputs/figures/fig_proposer_validity.pdf` | from data; runs, figure data from new runs partial |
 | Figures 21, 22 | Cold-Start admission rate and episode depth | `cmd/cold_start` | `cmd/cold_start/config.toml` | `fig_cold_start_data.json` | `outputs/figures/fig_cold_start_admission.pdf`, `fig_cold_start_depth.pdf` | from data; runs |
-| Table 13 | Cold-Start controls (acceptance, TB2.1) | `cmd/cold_start`, `cmd/evals` | same | `paper_tables.json` (transcribed) | `outputs/tables/tables.md` | runs (placeholder fine-tuning hyperparameters) |
+| Table 13 | Cold-Start controls (acceptance, TB2.1) | `cmd/cold_start`, `cmd/evals` | same | `paper_tables.json` (transcribed) | `outputs/tables/tables.md` | runs |
 | Figures 23, 24 | Authoring-style analyses | | | | | not released |
 
 ## Commands per experiment
@@ -165,14 +165,14 @@ Section 4.3, Appendix G; Figures 6, 7 and 20.
 
 Section 4.3, Appendix H; Figures 21, 22 and Table 13.
 
-- Fine-tune Qwen3.6-35B-A3B on 600 high-quality proposer trajectories from Claude Opus 5,
-  DeepSeek-V4-Flash and Kimi-K3 (`selfplay generate` per teacher, `export sft --limit 600`,
+- Fine-tune Qwen3.6-35B-A3B on all 600 admitted proposer trajectories collected from Claude
+  Opus 5, DeepSeek-V4-Flash and Kimi-K3 (`selfplay generate` per teacher, `export sft`,
   `train run --preset cold-start`).
 - Figures 21 and 22: a shared 136-assignment suite (frontier reference rows from earlier suites).
 - Table 13: 60 paired assignments for acceptance; Terminal-Bench 2.1 with five attempts on each
   of 89 tasks for avg@5 and pass@5.
-- The `cold-start` preset's epochs, learning rate and schedule are placeholders; the paper's
-  fine-tuning hyperparameters and selection rule are not recorded.
+- The `cold-start` preset is slime's standard SFT recipe for Qwen3.5-35B-A3B (3 epochs,
+  batch 128, lr 1e-5 cosine to 1e-6, 10% warmup), as used in the paper.
 
 ## Cross-domain generation (`cmd/cross_domain`)
 

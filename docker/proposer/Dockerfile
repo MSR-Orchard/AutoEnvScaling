@@ -62,6 +62,14 @@ RUN git init -q /tmp/harbor \
         "${HARBOR_SKILL_REPO}" "${HARBOR_SKILL_COMMIT}" > /opt/aes/skills/create-task/SOURCE \
     && test -f /opt/aes/skills/create-task/SKILL.md \
     && rm -rf /tmp/harbor
+# Benchmark blocklist for git. The proposer must not read Terminal-Bench or its GitHub repositories;
+# the web tools refuse those URLs (AES_BLOCKED_URL_PATTERNS) and these rules make `git clone` of
+# the repositories fail. GitHub itself stays reachable, so a raw download by other means is not
+# prevented here; enforce stricter rules in the sandbox infrastructure if needed.
+RUN for repo in laude-institute/terminal-bench harbor-framework/terminal-bench; do \
+        git config --system --add url."https://blocked.invalid/".insteadOf "https://github.com/${repo}"; \
+        git config --system --add url."https://blocked.invalid/".insteadOf "git@github.com:${repo}"; \
+    done
 COPY skills/auto_env_scaling /opt/aes/skills/auto_env_scaling
 COPY skills/harbor_domains /opt/aes/skills/harbor_domains
 

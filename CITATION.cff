@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use AutoEnvScaling, please cite the paper."
+title: "AutoEnvScaling: Automating the Data Flywheel with Terminal Agents"
+type: software
+repository-code: "https://github.com/MSR-Orchard/AutoEnvScaling"
+license: Apache-2.0
+authors:
+  - {given-names: Simon, family-names: Yu}
+  - {given-names: Baolin, family-names: Peng}
+  - {given-names: Bo, family-names: Liu}
+  - {given-names: Zhengyan, family-names: Shi}
+  - {given-names: Zhaoyang, family-names: Wang}
+  - {given-names: Hao, family-names: Cheng}
+  - {given-names: Qianhui, family-names: Wu}
+  - {given-names: Wenlin, family-names: Yao}
+  - {given-names: Natasha, family-names: Jaques}
+  - {given-names: Weiyan, family-names: Shi}
+  - {given-names: Jianfeng, family-names: Gao}

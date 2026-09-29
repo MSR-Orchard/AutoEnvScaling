@@ -57,7 +57,8 @@ def test_endpoint_agent_spec(monkeypatch):
     assert spec.kwargs == {"model_api": "openai-completions", "version": S.PI_VERSION}
     assert spec.env == {"OPENAI_BASE_URL": "http://solver.internal.test:30000/v1",
                         "OPENAI_API_KEY": "secret"}
-    assert spec.extra_allowed_hosts == () and spec.timeout_sec == 1200.0
+    # Allowlist by default: the endpoint host is reachable from the task container.
+    assert spec.extra_allowed_hosts == ("solver.internal.test",) and spec.timeout_sec == 1200.0
     closed = S.SolverEndpoint(base_url="https://solver.example.org/v1", model="org/m",
                               public_network=False)
     assert closed.agent_spec().extra_allowed_hosts == ("solver.example.org",)
@@ -124,7 +125,9 @@ async def test_run_solver_builds_trajectories(tmp_path):
     ep = S.SolverEndpoint(base_url="http://x.test/v1", model="solver-9b")
     task = _task(tmp_path / "task")
     trajs = await S.run_solver(task, ep, n=2, harbor_env="modal", runner=runner)
-    assert runner.kwargs["n_attempts"] == 2 and runner.kwargs["public_network"] is True
+    assert runner.kwargs["n_attempts"] == 2 and runner.kwargs["public_network"] is False
+    assert runner.kwargs["allowed_hosts"][0] == "x.test"
+    assert "registry.npmjs.org" in runner.kwargs["allowed_hosts"]
     assert runner.kwargs["instruction"] is None and runner.kwargs["label"] == "solver"
     a, b = trajs
     assert (a.reward, a.tests_passed, a.tests_total, a.model) == (0.5, 2, 4, "solver-9b")
