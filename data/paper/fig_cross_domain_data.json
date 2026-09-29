@@ -1,0 +1,288 @@
+{
+  "source": {
+    "description": "Frozen lineage records of the 3 x 7 cross-domain authoring matrix (checkpoint of 2026-09-14). Counts and attempt histograms are exact.",
+    "sha256_of_lineage_csv": "eceef235e6cf6d8ecb1b9cbdd5c6df08adf2320e04056f61d58d1309ce6020b7"
+  },
+  "definitions": {
+    "acceptance_rate": "Accepted packages / all terminal matrix lineages, including infrastructure statuses; 30 running lineages excluded.",
+    "acceptance_error_bars": "Two-sided 95% Wilson score intervals, computed from accepted and judged counts.",
+    "authoring_attempts": "Mean initial-plus-repair sessions within accepted lineages, range 1 to 3. This is not the number of repairs or tool-call turns.",
+    "interpretation": "Technical admission only; domain review and solver calibration were not completed. Harnesses and time limits differ across models.",
+    "timing_omitted": "The committed timing exports disagree and cover winning sessions only; cumulative timing must be reconstructed before adding a time panel."
+  },
+  "cells": [
+    {
+      "model": "gpt-6-astra",
+      "domain": "terminal",
+      "accepted": 53,
+      "judged": 73,
+      "unfinished": 4,
+      "accepted_attempt_counts": {
+        "1": 12,
+        "2": 41,
+        "3": 0
+      },
+      "mean_authoring_attempts": 1.7735849056603774
+    },
+    {
+      "model": "gpt-6-astra",
+      "domain": "swe",
+      "accepted": 51,
+      "judged": 52,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 32,
+        "2": 17,
+        "3": 2
+      },
+      "mean_authoring_attempts": 1.411764705882353
+    },
+    {
+      "model": "gpt-6-astra",
+      "domain": "tool",
+      "accepted": 51,
+      "judged": 52,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 42,
+        "2": 9,
+        "3": 0
+      },
+      "mean_authoring_attempts": 1.1764705882352942
+    },
+    {
+      "model": "gpt-6-astra",
+      "domain": "browser",
+      "accepted": 54,
+      "judged": 70,
+      "unfinished": 2,
+      "accepted_attempt_counts": {
+        "1": 13,
+        "2": 24,
+        "3": 17
+      },
+      "mean_authoring_attempts": 2.074074074074074
+    },
+    {
+      "model": "gpt-6-astra",
+      "domain": "desktop-cua",
+      "accepted": 48,
+      "judged": 135,
+      "unfinished": 1,
+      "accepted_attempt_counts": {
+        "1": 0,
+        "2": 12,
+        "3": 36
+      },
+      "mean_authoring_attempts": 2.75
+    },
+    {
+      "model": "gpt-6-astra",
+      "domain": "kernelbench",
+      "accepted": 54,
+      "judged": 60,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 1,
+        "2": 45,
+        "3": 8
+      },
+      "mean_authoring_attempts": 2.1296296296296298
+    },
+    {
+      "model": "gpt-6-astra",
+      "domain": "professional-workflow",
+      "accepted": 35,
+      "judged": 120,
+      "unfinished": 2,
+      "accepted_attempt_counts": {
+        "1": 0,
+        "2": 7,
+        "3": 28
+      },
+      "mean_authoring_attempts": 2.8
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "domain": "terminal",
+      "accepted": 56,
+      "judged": 71,
+      "unfinished": 4,
+      "accepted_attempt_counts": {
+        "1": 39,
+        "2": 17,
+        "3": 0
+      },
+      "mean_authoring_attempts": 1.3035714285714286
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "domain": "swe",
+      "accepted": 58,
+      "judged": 60,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 42,
+        "2": 13,
+        "3": 3
+      },
+      "mean_authoring_attempts": 1.3275862068965518
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "domain": "tool",
+      "accepted": 58,
+      "judged": 60,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 49,
+        "2": 8,
+        "3": 1
+      },
+      "mean_authoring_attempts": 1.1724137931034482
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "domain": "browser",
+      "accepted": 59,
+      "judged": 83,
+      "unfinished": 3,
+      "accepted_attempt_counts": {
+        "1": 30,
+        "2": 18,
+        "3": 11
+      },
+      "mean_authoring_attempts": 1.6779661016949152
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "domain": "desktop-cua",
+      "accepted": 59,
+      "judged": 96,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 4,
+        "2": 32,
+        "3": 23
+      },
+      "mean_authoring_attempts": 2.3220338983050848
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "domain": "kernelbench",
+      "accepted": 52,
+      "judged": 60,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 0,
+        "2": 28,
+        "3": 24
+      },
+      "mean_authoring_attempts": 2.4615384615384617
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "domain": "professional-workflow",
+      "accepted": 57,
+      "judged": 96,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 2,
+        "2": 29,
+        "3": 26
+      },
+      "mean_authoring_attempts": 2.4210526315789473
+    },
+    {
+      "model": "claude-opus-5",
+      "domain": "terminal",
+      "accepted": 60,
+      "judged": 72,
+      "unfinished": 4,
+      "accepted_attempt_counts": {
+        "1": 5,
+        "2": 35,
+        "3": 20
+      },
+      "mean_authoring_attempts": 2.25
+    },
+    {
+      "model": "claude-opus-5",
+      "domain": "swe",
+      "accepted": 52,
+      "judged": 59,
+      "unfinished": 2,
+      "accepted_attempt_counts": {
+        "1": 1,
+        "2": 32,
+        "3": 19
+      },
+      "mean_authoring_attempts": 2.3461538461538463
+    },
+    {
+      "model": "claude-opus-5",
+      "domain": "tool",
+      "accepted": 45,
+      "judged": 91,
+      "unfinished": 2,
+      "accepted_attempt_counts": {
+        "1": 1,
+        "2": 15,
+        "3": 29
+      },
+      "mean_authoring_attempts": 2.6222222222222222
+    },
+    {
+      "model": "claude-opus-5",
+      "domain": "browser",
+      "accepted": 22,
+      "judged": 100,
+      "unfinished": 2,
+      "accepted_attempt_counts": {
+        "1": 0,
+        "2": 5,
+        "3": 17
+      },
+      "mean_authoring_attempts": 2.772727272727273
+    },
+    {
+      "model": "claude-opus-5",
+      "domain": "desktop-cua",
+      "accepted": 27,
+      "judged": 44,
+      "unfinished": 2,
+      "accepted_attempt_counts": {
+        "1": 1,
+        "2": 10,
+        "3": 16
+      },
+      "mean_authoring_attempts": 2.5555555555555554
+    },
+    {
+      "model": "claude-opus-5",
+      "domain": "kernelbench",
+      "accepted": 58,
+      "judged": 60,
+      "unfinished": 0,
+      "accepted_attempt_counts": {
+        "1": 1,
+        "2": 22,
+        "3": 35
+      },
+      "mean_authoring_attempts": 2.586206896551724
+    },
+    {
+      "model": "claude-opus-5",
+      "domain": "professional-workflow",
+      "accepted": 52,
+      "judged": 115,
+      "unfinished": 2,
+      "accepted_attempt_counts": {
+        "1": 4,
+        "2": 14,
+        "3": 34
+      },
+      "mean_authoring_attempts": 2.576923076923077
+    }
+  ]
+}

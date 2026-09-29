@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""web_search: search the web through Serper (google.serper.dev).
+
+Usage:
+    web_search "openssh sshd_config hardening options"
+    web_search --num 8 --type news "CVE tarfile path traversal"
+    web_search --json "query"          # raw Serper JSON
+
+Needs SERPER_API_KEY in the environment; the key is never printed. Results whose URL points at a
+blocked host (AES_BLOCKED_HOSTS) or contains a blocked pattern (AES_BLOCKED_URL_PATTERNS, for
+example benchmark repositories) are dropped. Use web_fetch to read a result page.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+
+ENDPOINTS = {"search": "https://google.serper.dev/search", "news": "https://google.serper.dev/news"}
+DEFAULT_BLOCKED_PATTERNS = "terminal-bench,terminal_bench,tbench"
+
+
+def _csv(name: str, default: str = "") -> list[str]:
+    return [p.strip().lower() for p in os.environ.get(name, default).split(",") if p.strip()]
+
+
+def is_blocked(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    for blocked in _csv("AES_BLOCKED_HOSTS"):
+        if host == blocked or host.endswith("." + blocked):
+            return True
+    lowered = url.lower()
+    return any(p in lowered for p in _csv("AES_BLOCKED_URL_PATTERNS", DEFAULT_BLOCKED_PATTERNS))
+
+
+def search(query: str, num: int = 5, kind: str = "search", timeout: int = 20) -> dict:
+    key = os.environ.get("SERPER_API_KEY")
+    if not key:
+        raise RuntimeError("SERPER_API_KEY is not set")
+    req = urllib.request.Request(ENDPOINTS[kind], data=json.dumps({"q": query, "num": num}).encode(),
+                                 method="POST")
+    req.add_header("X-API-KEY", key)
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.load(resp)
+
+
+def filter_results(data: dict, kind: str = "search") -> dict:
+    field = "news" if kind == "news" else "organic"
+    hits = data.get(field) or []
+    kept = [h for h in hits if not is_blocked(h.get("link") or "")]
+    return {**data, field: kept, "_dropped": len(hits) - len(kept)}
+
+
+def format_results(data: dict, kind: str = "search") -> str:
+    lines: list[str] = []
+    answer = data.get("answerBox") or {}
+    if answer.get("answer") or answer.get("snippet"):
+        lines.append(f"ANSWER: {answer.get('answer') or answer.get('snippet')}")
+    for i, hit in enumerate(data.get("news" if kind == "news" else "organic") or [], 1):
+        title = (hit.get("title") or "").strip()
+        link = (hit.get("link") or "").strip()
+        snippet = (hit.get("snippet") or "").strip().replace("\n", " ")
+        lines.append(f"{i}. {title}\n   {link}\n   {snippet}")
+    if data.get("_dropped"):
+        lines.append(f"({data['_dropped']} result(s) from blocked sites removed)")
+    return "\n".join(lines) if lines else "(no results)"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="web_search", description="Search the web (Serper).")
+    ap.add_argument("query")
+    ap.add_argument("--num", type=int, default=5)
+    ap.add_argument("--type", default="search", choices=sorted(ENDPOINTS))
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        data = filter_results(search(args.query, args.num, args.type), args.type)
+    except RuntimeError as exc:
+        print(f"web_search: {exc}", file=sys.stderr)
+        return 2
+    except urllib.error.HTTPError as exc:
+        print(f"web_search: HTTP {exc.code} {exc.reason}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001  network errors: report, do not crash the agent
+        print(f"web_search: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(data, indent=2) if args.json else format_results(data, args.type))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,24 @@
+# One task domain per line; blank lines and lines starting with # are ignored.
+# Episode i of a generation batch receives line (i mod N) as its domain hint. Without a hint,
+# episodes started from an empty memory collapse onto one domain (in early runs five of the first
+# seven tasks were release or deploy gates), so diversity is injected per episode.
+log file analysis and summarisation over rotated plaintext logs
+CSV/TSV data cleaning and reconciliation between two exported files
+a small SQLite reporting query tool over a pre-seeded database
+parsing and rewriting structured config files (INI/TOML/YAML-like)
+a filesystem inventory and deduplication report over a seeded tree
+text extraction and normalisation from semi-structured documents
+a build-artifact packaging and manifest checker
+scheduling and calendar arithmetic over a fixture of events
+an inventory/stock reconciliation report over CSV ledgers
+static analysis of a small source tree (imports, dead code, metrics)
+a backup/restore integrity verifier over an archive tree
+unit conversion and measurement normalisation across mixed records
+a test-result aggregator over JUnit-style XML fixtures
+geospatial-lite computation over a fixture of coordinates
+a dependency-graph resolver over a lockfile-like fixture
+email/mbox-style message threading and summarisation
+an access-log-derived rate-limit and quota report
+image/media METADATA processing (no decoding; sidecar files only)
+a diff/patch application and conflict report tool
+a ledger double-entry bookkeeping validator

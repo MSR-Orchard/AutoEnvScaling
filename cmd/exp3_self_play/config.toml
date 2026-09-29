@@ -1,0 +1,27 @@
+# Experiment 3: shared-model self-play (Section 4.3, Table 12 in Appendix G.1).
+# These equal the package defaults and are repeated here so the run records them.
+
+work_dir = "runs/exp3_self_play"
+
+[sandbox]
+backend = "modal"
+harbor_env = "modal"
+
+[selfplay]
+learning_rate = 1e-6
+solver_envs_per_batch = 16
+solver_rollouts_per_env = 16
+proposer_group_size = 128
+proposer_interval = 16
+pool_size = 256
+pool_review_interval = 16
+dppo_tv_threshold = 0.1
+
+[calibration]
+band_low = 0.25
+band_high = 0.75
+min_reward_std = 0.1
+initial_rollouts = 4
+max_rollouts = 8
+boundary_margin = 0.15
+max_revisions = 2

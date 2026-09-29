@@ -1,0 +1,9 @@
+# Experiment 1: environment authoring across proposer models (Section 4.1).
+# Keys not listed keep the package defaults, which are the paper's values
+# (proposer sandbox 16 CPUs / 32 GiB / 2 hours, no turn limit).
+
+work_dir = "runs/exp1_authoring"
+
+[sandbox]
+backend = "modal"
+harbor_env = "modal"

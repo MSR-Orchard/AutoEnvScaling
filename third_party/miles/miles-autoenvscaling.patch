@@ -1,0 +1,442 @@
+# AutoEnvScaling changes to Miles (DPPO, reward handling and colocated-serving fixes).
+# Upstream: https://github.com/radixark/miles
+# Base commit: 5e392cf2cef761d4508e81b2a8f4c4b191d7a73c
+# Apply with: git apply miles-autoenvscaling.patch   (see README.md)
+#
+diff --git a/miles/backends/sglang_utils/sglang_engine.py b/miles/backends/sglang_utils/sglang_engine.py
+index 51e44d5..c53c0ba 100644
+--- a/miles/backends/sglang_utils/sglang_engine.py
++++ b/miles/backends/sglang_utils/sglang_engine.py
+@@ -398,18 +398,24 @@ class SGLangEngine(RayActor):
+         """Flush the cache of the server."""
+         if self.node_rank != 0:
+             return
+-        # flush cache will not return status_code 200 when there are pending requests
+-        for _ in range(60):
++        # flush_cache does not return 200 while requests are pending. Upstream slept only
++        # after an exception, so non-200 answers ran through every attempt in about a
++        # second, and one straggler request (for example an abandoned agent stream) failed
++        # the offload with "Timeout while flushing cache". Sleep after every non-200 answer
++        # and allow about 10 minutes for stragglers to finish; their samples are already
++        # discarded, only the engine queue has to drain.
++        for i in range(120):
+             try:
+                 response = requests.get(f"http://{self.server_host}:{self.server_port}/flush_cache")
+                 if response.status_code == 200:
+                     break
++                if i % 12 == 0:
++                    logger.info(f"flush_cache pending (attempt {i}): status={response.status_code}")
+             except NewConnectionError as e:
+                 raise e
+             except Exception as e:
+                 logger.info(f"Error flushing cache: {e}")
+-                time.sleep(1)
+-                continue
++            time.sleep(5)
+         else:
+             raise TimeoutError("Timeout while flushing cache.")
+ 
+@@ -419,34 +425,38 @@ class SGLangEngine(RayActor):
+ 
+         logger.info(f"Shutdown engine {self.server_host}:{self.server_port}...")
+         if self.node_rank == 0:
+-            worker_url = f"http://{self.server_host}:{self.server_port}"
+-            response = None
+-            if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
+-                response = requests.post(
+-                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url=http://{self.server_host}:{self.server_port}"
+-                )
+-            elif parse(sglang_router.__version__) < parse("0.3.0"):
+-                worker_url = quote(worker_url, safe="")
+-                response = requests.delete(f"http://{self.router_ip}:{self.router_port}/workers/{worker_url}")
+-            else:
+-                try:
+-                    all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
+-                    for worker in all_workers:
+-                        if worker["url"] == worker_url:
+-                            worker_id = worker["id"]
+-                            response = requests.delete(
+-                                f"http://{self.router_ip}:{self.router_port}/workers/{worker_id}"
+-                            )
+-                            break
+-                    else:
+-                        logger.warning(f"Worker {worker_url} not found in router during shutdown.")
+-                except Exception as e:
+-                    logger.warning(f"Failed to fetch workers list or remove worker: {e}")
+-
+-            if response is not None:
+-                response.raise_for_status()
++            self._router_remove_worker(context="shutdown")
+         kill_process_tree(self.process.pid)
+ 
++    def _router_remove_worker(self, *, context: str):
++        """Remove this engine from the router, across the three router API generations.
++
++        Shared by ``shutdown`` and by the memory-release detach, which must use the same
++        router API: an endpoint the router does not know fails silently and leaves the
++        engine reachable.
++        """
++        worker_url = f"http://{self.server_host}:{self.server_port}"
++        base = f"http://{self.router_ip}:{self.router_port}"
++        response = None
++        if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
++            response = requests.post(f"{base}/remove_worker?url={worker_url}")
++        elif parse(sglang_router.__version__) < parse("0.3.0"):
++            response = requests.delete(f"{base}/workers/{quote(worker_url, safe='')}")
++        else:
++            try:
++                all_workers = requests.get(f"{base}/workers").json()["workers"]
++                for worker in all_workers:
++                    if worker["url"] == worker_url:
++                        response = requests.delete(f"{base}/workers/{worker['id']}")
++                        break
++                else:
++                    logger.warning(f"Worker {worker_url} not found in router during {context}.")
++            except Exception as e:
++                logger.warning(f"Failed to fetch workers list or remove worker: {e}")
++
++        if response is not None:
++            response.raise_for_status()
++
+     def get_weight_version(self):
+         if self.node_rank != 0:
+             return
+@@ -465,9 +475,80 @@ class SGLangEngine(RayActor):
+             {"lora_name": lora_name},
+         )
+ 
++    def _guard_note(self, message: str):
++        """Report a router-guard event on stdout, which Ray forwards.
++
++        `logger` output from this actor reaches neither the driver log nor the Ray worker
++        logs, so without stdout there would be no record of whether the guard fired.
++        """
++        print(f"[router-guard] {message}", flush=True)
++        logger.info("router-guard: %s", message)
++
++    def _worker_url(self) -> str:
++        return f"http://{self.server_host}:{self.server_port}"
++
++    def _router_configured(self) -> bool:
++        return bool(self.node_rank == 0 and self.router_ip and self.router_port)
++
++    def _router_detach(self):
++        """Take this engine out of the router's rotation before its memory is released.
++
++        A colocated engine keeps listening while its KV cache and weights are paged out to
++        the CPU. A request that reaches it in that window makes the scheduler run a prefill
++        over CPU tensors and crash ("Pointer argument (at 0) cannot be accessed from
++        Triton"), which ends the run. Agents outside the trainer that still hold the router
++        address (for example proposer sandboxes) can send such requests. Detaching makes the
++        router fail them quickly instead.
++
++        Best effort: a failed detach only restores upstream behaviour, so it warns instead
++        of aborting a training step.
++        """
++        if not self._router_configured():
++            # Loud on purpose: a silent no-op here would look exactly like a working guard.
++            self._guard_note(
++                "NOT detaching before memory release: no router configured "
++                f"(node_rank={self.node_rank} router_ip={self.router_ip!r} "
++                f"router_port={self.router_port!r}); engine stays reachable while paged out"
++            )
++            return
++        worker_url = self._worker_url()
++        try:
++            self._router_remove_worker(context="memory release")
++            self._guard_note(f"detached {worker_url} before memory release")
++        except Exception as e:  # noqa: BLE001 - never fail a train step on the safety detach
++            self._guard_note(f"FAILED to detach {worker_url} ({e}); engine stays reachable")
++
++    def _router_attach(self, attempts: int = 5):
++        """Put this engine back in the router's rotation after resume (inverse of detach).
++
++        Unlike detach this must not be skipped silently: without the worker the router has
++        nowhere to send rollouts. Retries, then raises.
++        """
++        if not self._router_configured():
++            return
++        base = f"http://{self.router_ip}:{self.router_port}"
++        worker_url = self._worker_url()
++        last: Exception | None = None
++        for attempt in range(attempts):
++            try:
++                if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
++                    response = requests.post(f"{base}/add_worker?url={worker_url}", timeout=30)
++                else:
++                    payload = {"url": worker_url, "worker_type": self.worker_type}
++                    response = requests.post(f"{base}/workers", json=payload, timeout=30)
++                response.raise_for_status()
++                self._guard_note(f"re-attached {worker_url} after memory resume")
++                return
++            except Exception as e:  # noqa: BLE001 - retried below
++                last = e
++                self._guard_note(f"re-attach attempt {attempt+1}/{attempts} for {worker_url} failed ({e})")
++                time.sleep(2)
++        raise RuntimeError(f"router: could not re-attach {worker_url} after resume: {last}")
++
+     def release_memory_occupation(self, tags: list[str] = None):
+         """Release memory occupation. Available tags: weights, kv_cache."""
+         self.flush_cache()
++        self._router_detach()
+         return self._make_request(
+             "release_memory_occupation",
+             {"tags": tags},
+@@ -477,10 +558,12 @@ class SGLangEngine(RayActor):
+         """
+         Available tags for multi-stage resume: weights, kv_cache
+         """
+-        return self._make_request(
++        result = self._make_request(
+             "resume_memory_occupation",
+             {"tags": tags},
+         )
++        self._router_attach()
++        return result
+ 
+     def check_weights(
+         self, action: str, allow_quant_error: bool = False, selector: str = "all", skip_list: list[str] | None = None
+diff --git a/miles/backends/training_utils/loss_hub/advantages.py b/miles/backends/training_utils/loss_hub/advantages.py
+index 6baa65d..fb624ac 100644
+--- a/miles/backends/training_utils/loss_hub/advantages.py
++++ b/miles/backends/training_utils/loss_hub/advantages.py
+@@ -28,7 +28,7 @@ def compute_advantages(
+     Returns:
+         (advantages, returns) — both lists of tensors, one per sample.
+     """
+-    if args.advantage_estimator in ["grpo", "gspo"]:
++    if args.advantage_estimator in ["grpo", "gspo", "dppo"]:
+         rewards = torch.tensor(rewards, dtype=torch.float32, device=kl[0].device)
+         returns = get_grpo_returns(rewards, kl)
+         # TODO: is the copy necessary?
+diff --git a/miles/backends/training_utils/loss_hub/losses.py b/miles/backends/training_utils/loss_hub/losses.py
+index 6c52c26..08b335a 100644
+--- a/miles/backends/training_utils/loss_hub/losses.py
++++ b/miles/backends/training_utils/loss_hub/losses.py
+@@ -14,6 +14,7 @@ from miles.backends.training_utils.loss_hub.logit_processors import get_log_prob
+ from miles.backends.training_utils.loss_hub.math_utils import (
+     compute_approx_kl,
+     compute_ess_ratio_contribution,
++    compute_dppo_policy_loss,
+     compute_gspo_kl,
+     compute_opsm_mask,
+     compute_policy_loss,
+@@ -177,7 +178,22 @@ def policy_loss_function(
+         advantages.new_zeros(()),
+     )
+ 
+-    pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high)
++    if args.advantage_estimator == "dppo":
++        # DPPO enforces its trust region by masking rather than clipping, so eps_clip /
++        # eps_clip_high are deliberately unused here. old_log_probs is the behavior policy:
++        # under async rollout that should be the rollout engine's log-probs, but this stack
++        # is synchronous (ess_ratio ~= 1.0), so the trainer's old_log_probs is the same
++        # distribution.
++        pg_loss, pg_clipfrac = compute_dppo_policy_loss(
++            ppo_kl,
++            advantages,
++            old_log_probs,
++            log_probs,
++            args.dppo_divergence_type,
++            args.dppo_divergence_threshold,
++        )
++    else:
++        pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high)
+ 
+     if getattr(args, "dump_details", None) is not None:
+         from miles.backends.training_utils.debug_dump import maybe_dump_policy_loss_debug
+diff --git a/miles/backends/training_utils/loss_hub/math_utils.py b/miles/backends/training_utils/loss_hub/math_utils.py
+index 3cf34ef..2e344d1 100644
+--- a/miles/backends/training_utils/loss_hub/math_utils.py
++++ b/miles/backends/training_utils/loss_hub/math_utils.py
+@@ -246,6 +246,69 @@ def compute_gspo_kl(
+     return ppo_kl
+ 
+ 
++@torch.compile(dynamic=True)
++def compute_binary_divergence(
++    old_log_probs: torch.Tensor,
++    log_probs: torch.Tensor,
++    divergence_type: str,
++) -> torch.Tensor:
++    """Per-token binary (Bernoulli) divergence between the behavior and current policy.
++
++    Collapses the categorical distribution over the vocabulary into a Bernoulli over
++    ``{sampled_token, everything_else}`` using only the per-token log-probs already at
++    hand. This is a memory-cheap lower bound on the true policy divergence that needs no
++    extra forward pass. This is Eqs. 13/14 of the DPPO paper (arXiv:2602.04879).
++
++    Real log-probs are <= 0; the clamp keeps exp() inside (0, 1] even if a padding
++    sentinel leaks through.
++    """
++    mu = torch.exp(old_log_probs.clamp(min=-30.0, max=0.0))
++    pi = torch.exp(log_probs.clamp(min=-30.0, max=0.0))
++    if divergence_type == "tv":
++        return (mu - pi).abs()
++    if divergence_type == "kl":
++        eps = 1e-9
++        mu_c = mu.clamp(eps, 1.0 - eps)
++        pi_c = pi.clamp(eps, 1.0 - eps)
++        return mu_c * (mu_c.log() - pi_c.log()) + (1.0 - mu_c) * ((1.0 - mu_c).log() - (1.0 - pi_c).log())
++    raise ValueError(f"Unknown DPPO divergence type: {divergence_type!r}. Expected 'tv' or 'kl'.")
++
++
++@torch.compile(dynamic=True)
++def compute_dppo_policy_loss(
++    ppo_kl: torch.Tensor,
++    advantages: torch.Tensor,
++    old_log_probs: torch.Tensor,
++    log_probs: torch.Tensor,
++    divergence_type: str,
++    divergence_threshold: float,
++):
++    """DPPO (Divergence PPO) policy loss: a trust region enforced by masking, not clipping.
++
++    The unclipped surrogate ``-ratio * A`` is kept, and a mask zeros only those tokens
++    that would push the policy FURTHER from the rollout (``ratio > 1`` with positive
++    advantage, or ``ratio < 1`` with negative advantage) AND have already left the
++    divergence trust region. Updates that move the ratio back toward 1 are never masked,
++    which preserves PPO's beneficial asymmetry.
++
++    TMax (arXiv:2606.23321) uses DPPO instead of GRPO because GRPO is unstable in
++    long-horizon agentic training (their Fig. 7).
++
++    The masked fraction is returned in place of ``clipfrac`` so existing metric plumbing
++    keeps working; for DPPO the ``pg_clipfrac`` series reads as "fraction of tokens
++    excluded by the trust region".
++    """
++    ratio = _safe_exp_neg_ppo_kl(ppo_kl)
++    pg_losses = -ratio * advantages
++    with torch.no_grad():
++        divergence = compute_binary_divergence(old_log_probs, log_probs, divergence_type)
++        outside_region = divergence > divergence_threshold
++        bad_high = (advantages > 0) & (ratio > 1.0) & outside_region
++        bad_low = (advantages < 0) & (ratio < 1.0) & outside_region
++        keep = (~(bad_high | bad_low)).to(pg_losses.dtype)
++    return pg_losses * keep, 1.0 - keep
++
++
+ @torch.compile(dynamic=True)
+ def compute_policy_loss(
+     ppo_kl: torch.Tensor,
+diff --git a/miles/ray/rollout/router_manager.py b/miles/ray/rollout/router_manager.py
+index 4063aa6..02f6614 100644
+--- a/miles/ray/rollout/router_manager.py
++++ b/miles/ray/rollout/router_manager.py
+@@ -72,7 +72,15 @@ def start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool =
+     )
+     process.daemon = True
+     process.start()
+-    wait_for_server_ready(router_ip, router_port, process, timeout=30)
++    wait_for_server_ready(
++        router_ip,
++        router_port,
++        process,
++        # Configurable with --rollout-server-startup-timeout-secs (upstream: fixed 30 s).
++        # Router and session-server imports from a network filesystem with a cold cache can
++        # take longer than that. The wait returns as soon as the port answers.
++        timeout=getattr(args, "rollout_server_startup_timeout_secs", 300.0),
++    )
+     logger.info(f"Router launched at {router_ip}:{router_port}")
+     return router_ip, router_port
+ 
+@@ -111,5 +119,13 @@ def start_session_server(args):
+     process = multiprocessing.get_context("spawn").Process(target=run_session_server, args=(args, router_url))
+     process.daemon = True
+     process.start()
+-    wait_for_server_ready(ip, port, process, timeout=30)
++    wait_for_server_ready(
++        ip,
++        port,
++        process,
++        # Configurable with --rollout-server-startup-timeout-secs (upstream: fixed 30 s).
++        # Router and session-server imports from a network filesystem with a cold cache can
++        # take longer than that. The wait returns as soon as the port answers.
++        timeout=getattr(args, "rollout_server_startup_timeout_secs", 300.0),
++    )
+     logger.info(f"Session server launched at {ip}:{port}")
+diff --git a/miles/utils/arguments.py b/miles/utils/arguments.py
+index 53dcc34..23bdb8e 100644
+--- a/miles/utils/arguments.py
++++ b/miles/utils/arguments.py
+@@ -1083,6 +1083,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+                 choices=[
+                     "grpo",
+                     "gspo",
++                    "dppo",
+                     "reinforce_plus_plus",
+                     "reinforce_plus_plus_baseline",
+                     "ppo",
+@@ -1093,6 +1094,27 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+                     "to the advantage estimator. Use --opd-kl-coef > 0 to enable OPD on top of any estimator."
+                 ),
+             )
++            parser.add_argument(
++                "--dppo-divergence-type",
++                type=str,
++                choices=["tv", "kl"],
++                default="tv",
++                help=(
++                    "DPPO only: divergence defining the trust region, computed on the binary "
++                    "(Bernoulli) collapse of the token distribution. 'tv' is total variation "
++                    "(the TMax setting); 'kl' is the binary KL."
++                ),
++            )
++            parser.add_argument(
++                "--dppo-divergence-threshold",
++                type=float,
++                default=0.1,
++                help=(
++                    "DPPO only: trust-region radius delta. A token is masked out of the policy "
++                    "gradient when its binary divergence exceeds this AND the update would push "
++                    "further from the rollout policy. TMax (arXiv:2606.23321) uses 0.1 with tv."
++                ),
++            )
+             parser.add_argument(
+                 "--disable-compute-advantages-and-returns",
+                 action="store_false",
+@@ -1393,6 +1415,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+             return parser
+ 
+         def add_router_arguments(parser):
++            parser.add_argument(
++                "--rollout-server-startup-timeout-secs",
++                type=float,
++                default=30.0,
++                help="Maximum seconds to wait for spawned rollout router and session-server processes.",
++            )
+             parser.add_argument(
+                 "--use-miles-router",
+                 action="store_true",
+diff --git a/miles/utils/data.py b/miles/utils/data.py
+index fd79cc5..dee6dc0 100644
+--- a/miles/utils/data.py
++++ b/miles/utils/data.py
+@@ -236,7 +236,10 @@ class Dataset:
+             )
+ 
+         if max_length is not None:
+-            self.origin_samples = filter_long_prompt(origin_samples, tokenizer, processor, max_length)
++            _filtered = filter_long_prompt(origin_samples, tokenizer, processor, max_length)
++            # filter_long_prompt returns False (not a list) when filtering is skipped
++            # (list prompts, no template); fall back to the unfiltered samples.
++            self.origin_samples = _filtered if _filtered is not False else origin_samples
+         else:
+             self.origin_samples = origin_samples
+ 
+diff --git a/miles/utils/processing_utils.py b/miles/utils/processing_utils.py
+index 855a06a..befc0b1 100644
+--- a/miles/utils/processing_utils.py
++++ b/miles/utils/processing_utils.py
+@@ -152,6 +152,11 @@ def load_processor(name_or_path: str, **kwargs):
+ 
+ 
+ def process_vision_info(prompt, processor):
++    # Prompts rendered with a chat template are plain strings. qwen_vl_utils'
++    # process_vision_info iterates the prompt as a list of message dicts and fails on a
++    # string; a text-only prompt carries no media, so return early.
++    if isinstance(prompt, str):
++        return {"images": None, "videos": None}
+     # TODO: temporary solution, will write image utils for miles later
+     from qwen_vl_utils import process_vision_info as qwen_process_vision_info
+ 

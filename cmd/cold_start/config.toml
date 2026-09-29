@@ -1,0 +1,9 @@
+# Cold-Start: proposer fine-tuning before self-play (Appendix H).
+# Admission for Figure 21 and Table 13: the image builds, the reference solution passes, and a
+# do-nothing solution fails.
+
+work_dir = "runs/cold_start"
+
+[sandbox]
+backend = "modal"
+harbor_env = "modal"

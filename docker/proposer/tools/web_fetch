@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""web_fetch: fetch a public web page as readable text.
+
+Usage:
+    web_fetch https://docs.python.org/3/library/tarfile.html
+    web_fetch --max-chars 50000 <url>
+    web_fetch --raw <url>              # the response body without HTML-to-text conversion
+
+Refuses blocked hosts and URL patterns (AES_BLOCKED_HOSTS, AES_BLOCKED_URL_PATTERNS) and private
+or loopback addresses. HTML is reduced to text; the output is cut at --max-chars.
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import ipaddress
+import os
+import re
+import socket
+import sys
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+
+DEFAULT_BLOCKED_PATTERNS = "terminal-bench,terminal_bench,tbench"
+USER_AGENT = "Mozilla/5.0 (compatible; autoenvscaling-proposer/0.1)"
+
+
+def _csv(name: str, default: str = "") -> list[str]:
+    return [p.strip().lower() for p in os.environ.get(name, default).split(",") if p.strip()]
+
+
+def refusal(url: str) -> str | None:
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return "only http(s) URLs are allowed"
+    host = (parts.hostname or "").lower()
+    if not host:
+        return "URL has no host"
+    for blocked in _csv("AES_BLOCKED_HOSTS"):
+        if host == blocked or host.endswith("." + blocked):
+            return f"{host} is blocked"
+    if any(p in url.lower() for p in _csv("AES_BLOCKED_URL_PATTERNS", DEFAULT_BLOCKED_PATTERNS)):
+        return "this URL matches a blocked benchmark pattern"
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except socket.gaierror as exc:
+        return f"cannot resolve {host}: {exc}"
+    for addr in addresses:
+        ip = ipaddress.ip_address(addr.split("%")[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+            return f"{host} resolves to a non-public address ({addr})"
+    return None
+
+
+def html_to_text(body: str) -> str:
+    body = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", body)
+    body = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h[1-6]|tr|pre|section|article)>", "\n", body)
+    body = re.sub(r"(?s)<[^>]+>", " ", body)
+    body = html.unescape(body)
+    body = re.sub(r"[ \t\r\f\v]+", " ", body)
+    return re.sub(r"\n\s*\n+", "\n\n", body).strip()
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="web_fetch", description="Fetch a public web page as text.")
+    ap.add_argument("url")
+    ap.add_argument("--max-chars", type=int, default=20000)
+    ap.add_argument("--raw", action="store_true")
+    ap.add_argument("--timeout", type=float, default=30.0)
+    args = ap.parse_args(argv)
+    reason = refusal(args.url)
+    if reason:
+        print(f"web_fetch: refused: {reason}", file=sys.stderr)
+        return 2
+    req = urllib.request.Request(args.url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+            final_reason = refusal(resp.geturl())
+            if final_reason:
+                print(f"web_fetch: refused after redirect: {final_reason}", file=sys.stderr)
+                return 2
+            charset = resp.headers.get_content_charset() or "utf-8"
+            body = resp.read(5_000_000).decode(charset, errors="replace")
+            content_type = resp.headers.get_content_type()
+    except urllib.error.HTTPError as exc:
+        print(f"web_fetch: HTTP {exc.code} {exc.reason}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001  network errors: report, do not crash the agent
+        print(f"web_fetch: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    text = body if args.raw or "html" not in content_type else html_to_text(body)
+    if len(text) > args.max_chars:
+        text = text[:args.max_chars] + f"\n...[{len(text) - args.max_chars} more characters]"
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

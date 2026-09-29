@@ -1,0 +1,16 @@
+# Experiment 2: solver RL on curricula from frontier proposers (Section 4.2).
+# Group size 16 and 16 environments per batch; calibration band [0.25, 0.75] with std >= 0.1.
+# The 128k maximum sequence length is part of the Miles presets exp2-qwen3.5-9b and
+# exp2-qwen3.5-35b-a3b.
+
+work_dir = "runs/exp2_solver_rl"
+
+[sandbox]
+backend = "modal"
+harbor_env = "modal"
+solver_cpu = 4
+solver_memory_gib = 8
+
+[selfplay]
+solver_envs_per_batch = 16
+solver_rollouts_per_env = 16

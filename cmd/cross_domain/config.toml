@@ -1,0 +1,12 @@
+# Cross-domain environment generation (Appendix C). Solver training is not part of this study.
+# With this release only the terminal domain runs, through the standard admission checks; the
+# appendix's do-nothing-earns-zero and reset checks are not implemented.
+
+work_dir = "runs/cross_domain"
+
+[sandbox]
+backend = "modal"
+harbor_env = "modal"
+
+[calibration]
+max_revisions = 2

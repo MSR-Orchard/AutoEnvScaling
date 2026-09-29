@@ -1,0 +1,109 @@
+{
+  "description": "Values of the paper's tables that have no other data file, transcribed from the LaTeX source of the arXiv version. The underlying runs are not released; these numbers are what analysis/make_tables.py renders and what the tests compare the package defaults against.",
+  "tab:training": {
+    "number": 3,
+    "caption": "AutoEnvScaling versus baseline. Held-out Terminal-Bench 2.1 (avg@5) under matched training steps; +/- gives the confidence interval.",
+    "proposers": ["GPT-5.6-sol", "Claude Opus 5"],
+    "rows": [
+      {"solver": "Qwen3.5-9B", "setting": "base", "shared": [19.1, 2.3]},
+      {"solver": "Qwen3.5-9B", "setting": "tmax", "values": [[27.2, 1.4], [29.2, 2.1]]},
+      {"solver": "Qwen3.5-9B", "setting": "autoenvscaling", "values": [[33.5, 1.9], [36.6, 1.7]]},
+      {"solver": "Qwen3.5-35B-A3B", "setting": "base", "shared": [26.7, 2.2]},
+      {"solver": "Qwen3.5-35B-A3B", "setting": "tmax", "values": [[34.6, 1.9], [35.5, 1.6]]},
+      {"solver": "Qwen3.5-35B-A3B", "setting": "autoenvscaling_without_solver_feedback", "values": [[35.3, 2.3], [32.6, 1.7]]},
+      {"solver": "Qwen3.5-35B-A3B", "setting": "autoenvscaling", "values": [[38.9, 2.4], [39.3, 1.6]]}
+    ]
+  },
+  "tab:hil-frontier": {
+    "number": 4,
+    "caption": "HiL-Bench results for base and frontier models. full_info gives the complete instruction; ask_human gives an incomplete instruction and the ask_human tool. Ask-F1 is measured in the ask_human setting. All values are percentages.",
+    "columns": ["sql_full_info", "sql_ask_human", "sql_ask_f1", "swe_full_info", "swe_ask_human", "swe_ask_f1"],
+    "rows": [
+      {"model": "Qwen3.5-9B", "values": [13.6, 0.3, 0.1, 21.1, 0.0, 0.0]},
+      {"model": "Qwen3.6-35B-A3B", "values": [34.2, 0.3, 0.7, 35.0, 0.0, 0.0]},
+      {"model": "GPT-5.6-sol", "values": [51.2, 0.7, 1.9, 42.7, 2.7, 0.0]},
+      {"model": "Claude Opus 5", "values": [36.5, 2.1, 8.3, 52.5, 7.5, 14.4]}
+    ]
+  },
+  "tab:hil-training": {
+    "number": 5,
+    "caption": "Training Qwen3.6-35B-A3B to ask for help on HiL-Bench software engineering tasks. Instances are cold-start trajectories or RL training tasks. Task success and Ask-F1 are measured in the ask_human setting on held-out tasks. All values are percentages.",
+    "columns": ["instances", "task_success", "ask_f1", "ask_rate"],
+    "rows": [
+      {"setting": "Qwen3.6-35B-A3B", "values": [null, 0.0, 0.0, 1.8]},
+      {"setting": "+ Cold start", "values": [75, 1.2, 10.1, 71.4]},
+      {"setting": "+ Cold start + official training set RL", "values": [100, 6.8, 29.6, 84.2]},
+      {"setting": "+ Cold start + AutoEnvScaling", "values": [500, 33.9, 55.3, 89.8]}
+    ]
+  },
+  "tab:cross-domain-results": {
+    "number": 8,
+    "caption": "Technical admission across seven domains. Acceptance is measured over completed, evaluable generation runs. Rounds include the initial attempt and subsequent revisions, averaged over accepted tasks (range 1-3).",
+    "note": "Acceptance here excludes runs terminated by external execution failures (1,061 of 1,489 evaluable runs). fig_cross_domain_data.json keeps infrastructure statuses in the denominator (1,061 of 1,629), so its rates are lower and it cannot reproduce this table.",
+    "columns": ["acceptance_pct", "rounds"],
+    "rows": [
+      {"domain": "Terminal", "proposer": "GPT-6-astra", "values": [100.0, 1.77]},
+      {"domain": "Terminal", "proposer": "GPT-5.6-sol", "values": [100.0, 1.30]},
+      {"domain": "Terminal", "proposer": "Claude Opus 5", "values": [93.8, 2.25]},
+      {"domain": "Software engineering", "proposer": "GPT-6-astra", "values": [100.0, 1.41]},
+      {"domain": "Software engineering", "proposer": "GPT-5.6-sol", "values": [100.0, 1.33]},
+      {"domain": "Software engineering", "proposer": "Claude Opus 5", "values": [91.2, 2.35]},
+      {"domain": "Tool calling", "proposer": "GPT-6-astra", "values": [100.0, 1.18]},
+      {"domain": "Tool calling", "proposer": "GPT-5.6-sol", "values": [100.0, 1.17]},
+      {"domain": "Tool calling", "proposer": "Claude Opus 5", "values": [57.0, 2.62]},
+      {"domain": "Browser use", "proposer": "GPT-6-astra", "values": [80.6, 2.07]},
+      {"domain": "Browser use", "proposer": "GPT-5.6-sol", "values": [77.6, 1.68]},
+      {"domain": "Browser use", "proposer": "Claude Opus 5", "values": [26.2, 2.77]},
+      {"domain": "Computer use", "proposer": "GPT-6-astra", "values": [40.3, 2.75]},
+      {"domain": "Computer use", "proposer": "GPT-5.6-sol", "values": [62.8, 2.32]},
+      {"domain": "Computer use", "proposer": "Claude Opus 5", "values": [79.4, 2.56]},
+      {"domain": "GPU kernels", "proposer": "GPT-6-astra", "values": [93.1, 2.13]},
+      {"domain": "GPU kernels", "proposer": "GPT-5.6-sol", "values": [86.7, 2.46]},
+      {"domain": "GPU kernels", "proposer": "Claude Opus 5", "values": [96.7, 2.59]},
+      {"domain": "Professional workflows", "proposer": "GPT-6-astra", "values": [33.3, 2.80]},
+      {"domain": "Professional workflows", "proposer": "GPT-5.6-sol", "values": [62.0, 2.42]},
+      {"domain": "Professional workflows", "proposer": "Claude Opus 5", "values": [46.0, 2.58]}
+    ]
+  },
+  "tab:sandbox-resources": {
+    "number": 10,
+    "caption": "Sandbox resources.",
+    "proposer": {"cpus": 16, "memory_gib": 32, "time_budget_hours": 2, "turn_limit": null, "coding_agent": "Claude Code, Codex, or Pi"},
+    "solver": {"cpus": 4, "memory_gib": 8, "time_budget_hours": null, "turn_limit": null, "coding_agent": "Pi"}
+  },
+  "tab:selfvalidate": {
+    "number": 11,
+    "caption": "Executing the reference solution improves valid-environment rate. Valid-environment rate (%) with the generation self-check disabled or enabled.",
+    "columns": ["self_check_disabled", "self_check_enabled"],
+    "rows": [
+      {"proposer": "Claude Opus 5", "values": [52.0, 94.0]},
+      {"proposer": "GPT-5.6-sol", "values": [19.5, 84.8]},
+      {"proposer": "GPT-5.6-terra", "values": [45.2, 93.5]},
+      {"proposer": "GPT-5.6-luna", "values": [40.1, 85.3]},
+      {"proposer": "DeepSeek-V4-Flash", "values": [19.4, 73.0]}
+    ]
+  },
+  "tab:training-settings": {
+    "number": 12,
+    "caption": "Settings for shared-model recursive training.",
+    "learning_rate": 1e-6,
+    "solver_envs_per_batch": 16,
+    "solver_rollouts_per_env": 16,
+    "proposer_group_size": 128,
+    "proposer_interval": 16,
+    "pool_size": 256,
+    "pool_review_interval": 16,
+    "dppo_tv_threshold": 0.1,
+    "kl_coefficient": 0,
+    "entropy_coefficient": 0
+  },
+  "tab:initialization-controls": {
+    "number": 13,
+    "caption": "Cold-Start improves environment generation without a detected change in solving performance. Environment acceptance uses the same 60 assignments for both models. Solving uses five attempts on each of 89 Terminal-Bench 2.1 tasks. All values are percentages.",
+    "columns": ["environment_acceptance", "tb21_avg_at_5", "tb21_pass_at_5"],
+    "rows": [
+      {"model": "Base", "values": [33.3, 40.0, 59.6]},
+      {"model": "Cold-Start", "values": [76.7, 41.1, 66.3]}
+    ]
+  }
+}

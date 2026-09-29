@@ -1,0 +1,8 @@
+# HiL-Bench study (Section 4.5). Generation uses the proposer defaults (16 CPUs, 32 GiB,
+# 2 hours); the HiL authoring prompt is autoenvscaling/evals/hilbench/generation_instruction.md.
+
+work_dir = "runs/hilbench"
+
+[sandbox]
+backend = "modal"
+harbor_env = "modal"

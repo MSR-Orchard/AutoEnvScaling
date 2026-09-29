@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""aes-validate: check a Harbor task the way the host's validation will, before submitting.
+
+Runs two Harbor trials, each in a fresh child container (``harbor run -e <env>``):
+
+    reference   Harbor's oracle agent runs solution/solve.sh. The reward must be at least
+                AES_VALIDATION_REFERENCE_MIN_REWARD (default 1.0).
+    empty       Harbor's nop agent does nothing. The reward must be below
+                AES_VALIDATION_EMPTY_MAX_REWARD (default 0.5).
+
+Usage:
+    aes-validate <task_dir>                   # both checks, in parallel
+    aes-validate <task_dir> --only reference  # one check
+    aes-validate <task_dir> --env docker      # another Harbor environment type
+
+Prints one line per check and the path of a JSON report (under logs/aes-validate/) that includes
+the tail of each trial's verifier output. Exit status: 0 every check passed, 1 a check failed,
+2 usage error, 3 Harbor produced no reward (build or infrastructure failure; read the report).
+
+The child containers use the Harbor environment named by --env, AES_SANDBOX_HARBOR_ENV, or
+"modal". Modal child containers need MODAL_TOKEN_ID and MODAL_TOKEN_SECRET in the environment.
+
+This tool is yours to improve; it lives in tools/ and persists across rounds. The host runs its
+own validation after you finish, so changing this file does not change what is admitted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+CHECKS = {"reference": "oracle", "empty": "nop"}
+VERIFIER_TAIL_CHARS = 1500
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def harbor_command(task_dir: Path, agent: str, env_type: str, jobs_dir: Path,
+                   job_name: str) -> list[str]:
+    return ["harbor", "run", "-p", str(task_dir), "-a", agent, "-e", env_type,
+            "-o", str(jobs_dir), "--job-name", job_name, "-k", "1", "-n", "1", "-y", "-q"]
+
+
+def read_rewards(job_dir: Path) -> tuple[list[float], list[str]]:
+    """Rewards and exception types from a Harbor job directory."""
+    rewards: list[float] = []
+    exceptions: list[str] = []
+    result = job_dir / "result.json"
+    if result.is_file():
+        try:
+            stats = json.loads(result.read_text()).get("stats") or {}
+        except (OSError, ValueError):
+            stats = {}
+        for evals in (stats.get("evals") or {}).values():
+            for value, trials in ((evals.get("reward_stats") or {}).get("reward") or {}).items():
+                try:
+                    rewards += [float(value)] * max(len(trials), 1)
+                except (TypeError, ValueError):
+                    pass
+            exceptions += list((evals.get("exception_stats") or {}).keys())
+    if not rewards:
+        for trial in sorted(p for p in job_dir.glob("*") if p.is_dir()):
+            reward = _trial_reward(trial / "verifier")
+            if reward is not None:
+                rewards.append(reward)
+    return rewards, exceptions
+
+
+def _trial_reward(verifier_dir: Path) -> float | None:
+    text = verifier_dir / "reward.txt"
+    if text.is_file():
+        try:
+            return float(text.read_text().strip())
+        except ValueError:
+            return None
+    data = verifier_dir / "reward.json"
+    if data.is_file():
+        try:
+            value = json.loads(data.read_text())
+        except ValueError:
+            return None
+        if isinstance(value, dict) and "reward" in value:
+            return float(value["reward"])
+    return None
+
+
+def trial_details(job_dir: Path) -> list[dict]:
+    details = []
+    for trial in sorted(p for p in job_dir.glob("*") if p.is_dir()):
+        entry: dict = {"trial_dir": str(trial)}
+        stdout = trial / "verifier" / "test-stdout.txt"
+        if stdout.is_file():
+            entry["verifier_tail"] = stdout.read_text(errors="replace")[-VERIFIER_TAIL_CHARS:]
+        exception = trial / "exception.txt"
+        if exception.is_file():
+            entry["exception_tail"] = exception.read_text(errors="replace")[-VERIFIER_TAIL_CHARS:]
+        details.append(entry)
+    return details
+
+
+def judge(check: str, rewards: list[float], reference_min: float, empty_max: float) -> str:
+    if not rewards:
+        return "no_reward"
+    reward = max(rewards) if check == "reference" else min(rewards)
+    ok = reward >= reference_min if check == "reference" else reward < empty_max
+    return "pass" if ok else "fail"
+
+
+def run_check(check: str, task_dir: Path, env_type: str, jobs_dir: Path,
+              timeout_s: float) -> dict:
+    job_name = f"{check}-{int(time.time())}"
+    cmd = harbor_command(task_dir, CHECKS[check], env_type, jobs_dir, job_name)
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=False)
+        returncode, output = proc.returncode, (proc.stdout + proc.stderr)
+    except subprocess.TimeoutExpired as exc:
+        returncode, output = 124, f"harbor run timed out after {timeout_s:g}s\n{exc.stdout or ''}"
+    except FileNotFoundError:
+        returncode, output = 127, "harbor CLI not found on PATH"
+    job_dir = jobs_dir / job_name
+    rewards, exceptions = read_rewards(job_dir)
+    return {"check": check, "agent": CHECKS[check], "command": cmd, "returncode": returncode,
+            "rewards": rewards, "exceptions": exceptions, "job_dir": str(job_dir),
+            "wall_time_s": round(time.monotonic() - started, 1),
+            "harbor_output_tail": output[-VERIFIER_TAIL_CHARS:],
+            "trials": trial_details(job_dir) if job_dir.is_dir() else []}
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="aes-validate",
+                                 description="Run the reference and empty-solution checks.")
+    ap.add_argument("task_dir")
+    ap.add_argument("--only", choices=sorted(CHECKS), default=None)
+    ap.add_argument("--env", default=os.environ.get("AES_SANDBOX_HARBOR_ENV", "modal"),
+                    help="Harbor environment type for the child containers")
+    ap.add_argument("--jobs-dir", type=Path, default=None)
+    ap.add_argument("--timeout", type=float,
+                    default=_float_env("AES_VALIDATE_TIMEOUT_S", 3600.0))
+    ap.add_argument("--out", type=Path, default=None, help="where to write the JSON report")
+    args = ap.parse_args(argv)
+
+    task_dir = Path(args.task_dir).resolve()
+    missing = [rel for rel in ("task.toml", "instruction.md", "solution/solve.sh",
+                               "tests/test.sh") if not (task_dir / rel).is_file()]
+    if not task_dir.is_dir() or missing:
+        print(f"aes-validate: {task_dir} is not a complete Harbor task (missing {missing})",
+              file=sys.stderr)
+        return 2
+    reference_min = _float_env("AES_VALIDATION_REFERENCE_MIN_REWARD", 1.0)
+    empty_max = _float_env("AES_VALIDATION_EMPTY_MAX_REWARD", 0.5)
+    jobs_dir = args.jobs_dir or Path(tempfile.mkdtemp(prefix="aes-validate-"))
+    checks = [args.only] if args.only else list(CHECKS)
+
+    with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+        results = list(pool.map(
+            lambda c: run_check(c, task_dir, args.env, jobs_dir, args.timeout), checks))
+    for result in results:
+        result["verdict"] = judge(result["check"], result["rewards"], reference_min, empty_max)
+
+    report = {"task_dir": str(task_dir), "env": args.env, "reference_min_reward": reference_min,
+              "empty_max_reward": empty_max, "checks": results}
+    out = args.out or Path("logs") / "aes-validate" / f"{task_dir.name}-{int(time.time())}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2))
+
+    for r in results:
+        want = f">= {reference_min:g}" if r["check"] == "reference" else f"< {empty_max:g}"
+        got = ", ".join(f"{x:g}" for x in r["rewards"]) or "none"
+        print(f"{r['check']}: reward={got} (want {want}) -> {r['verdict']}")
+    print(f"report: {out}")
+    verdicts = {r["verdict"] for r in results}
+    if "no_reward" in verdicts:
+        return 3
+    return 0 if verdicts == {"pass"} else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

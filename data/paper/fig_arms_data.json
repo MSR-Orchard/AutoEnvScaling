@@ -1,0 +1,509 @@
+{
+  "description": "Figure 3 and Table 1 authoring results; counts and costs share this source.",
+  "sources": {
+    "legacy-three-way": {
+      "description": "Original three-way authoring comparison: Claude Opus 5, GPT-5.6-sol, -terra and -luna, DeepSeek-V4-Flash, and the Grok Prompt and Prompt + Env Feedback cells."
+    },
+    "september-14-checkpoint": {
+      "description": "Authoring campaign checkpoint of 2026-09-14 (Gemini-3.8-Flash cells and the Grok 4.6 AutoEnvScaling cell)."
+    },
+    "plot_style": {
+      "description": "Layout and palette of the original arms figure."
+    },
+    "september-14-cost-audit": {
+      "description": "Cache-aware cost audit of 2026-09-14 (not released; per-cell costs are reproduced in the rows below).",
+      "pricing_date": "2026-09-14"
+    },
+    "september-17-astra-stopped": {
+      "description": "GPT-6-astra campaign stopped on 2026-09-17; summary released as astra_results_20260917.json."
+    }
+  },
+  "conventions": {
+    "rate": "Accepted divided by scored; recorded infrastructure failures and provider refusals excluded. Model rejections retained.",
+    "interval": "Two-sided 95% Wilson score interval.",
+    "grok_snapshot": "135/157 across two serving configurations (103/125 subscription, 32/32 proxy); 194/200 terminal and six uncompleted assignments. Descriptive aggregate, not a homogeneous provider comparison.",
+    "gemini_replacement": "All three arms use Gemini-3.8-Flash measurements; no Gemini-3.6-Flash result is reused.",
+    "cost": "Gemini Prompt/feedback estimates separately price uncached input, recorded cache reads, and output; total recorded cost over scored episodes is divided by accepted environments. Gemini and Grok Harness costs are the experiment-agent results supplied by the authors, not this script's raw-usage reconstruction. Grok Prompt/feedback and the other five models retain their original published costs. The conflicting Harness reconstruction is preserved as diagnostic evidence and is not used for Table 1. The other five rows retain their previously reported costs and have not been re-audited for cache accounting in this model refresh.",
+    "astra_snapshot": "Stopped campaign: Prompt and feedback each finished 302/400 assignments, Harness 200/200. Rates and costs exclude recorded infrastructure failures (32, 37, 51); unfinished assignments are not scored. All 804 assignment accounting entries were checked against the summary.",
+    "astra_cost": "Recorded model-token estimate, not invoice: Harness cache reads assumed free; Prompt and feedback retain public API-equivalent pricing. Feedback includes its paired Prompt seed. Ordinary quality failures and repairs remain priced. Unmetered transport errors, recovery/qualification probes, infrastructure, and monitoring chat are excluded. Standard public-price Harness equivalent is $6.03 per valid environment."
+  },
+  "replacement_cohorts": [
+    {
+      "acceptance_rate": 0.2622107969151671,
+      "accepted": 102,
+      "arm": "prompt",
+      "cohort": "gemini-prompt",
+      "infrastructure_failure": 10,
+      "model_rejection": 287,
+      "provider_refusal": 1,
+      "scored": 389,
+      "target": 400,
+      "terminal": 400,
+      "truncated": 0
+    },
+    {
+      "acceptance_rate": 0.5956873315363881,
+      "accepted": 221,
+      "arm": "feedback",
+      "cohort": "gemini-feedback",
+      "infrastructure_failure": 27,
+      "model_rejection": 150,
+      "provider_refusal": 2,
+      "scored": 371,
+      "target": 400,
+      "terminal": 400,
+      "truncated": 0
+    },
+    {
+      "acceptance_rate": 0.6481481481481481,
+      "accepted": 105,
+      "arm": "harness",
+      "cohort": "gemini-harness",
+      "infrastructure_failure": 38,
+      "model_rejection": 57,
+      "provider_refusal": 0,
+      "scored": 162,
+      "target": 200,
+      "terminal": 200,
+      "truncated": 76
+    },
+    {
+      "acceptance_rate": 0.824,
+      "accepted": 103,
+      "arm": "harness",
+      "cohort": "grok-harness-subscription",
+      "infrastructure_failure": 27,
+      "model_rejection": 22,
+      "provider_refusal": 0,
+      "scored": 125,
+      "target": 152,
+      "terminal": 152,
+      "truncated": 44
+    },
+    {
+      "acceptance_rate": 1.0,
+      "accepted": 32,
+      "arm": "harness",
+      "cohort": "grok-harness-proxy",
+      "infrastructure_failure": 10,
+      "model_rejection": 0,
+      "provider_refusal": 0,
+      "scored": 32,
+      "target": 48,
+      "terminal": 42,
+      "truncated": 0
+    }
+  ],
+  "rows": [
+    {
+      "key": "opus",
+      "label": "Claude Opus 5",
+      "arms": {
+        "prompt": {
+          "accepted": 285,
+          "scored": 382,
+          "rate": 0.7460732984293194,
+          "ci": [
+            0.7001235748434953,
+            0.7871230051001914
+          ],
+          "cost_usd": 0.72,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "feedback": {
+          "accepted": 341,
+          "scored": 381,
+          "rate": 0.89501312335958,
+          "ci": [
+            0.8601907005049547,
+            0.9219492760464367
+          ],
+          "cost_usd": 0.7,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "harness": {
+          "accepted": 373,
+          "scored": 397,
+          "rate": 0.9395465994962217,
+          "ci": [
+            0.9116254985775839,
+            0.9590426157099551
+          ],
+          "cost_usd": 1.18,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way",
+          "cost_ratio_vs_prompt": 1.6
+        }
+      }
+    },
+    {
+      "key": "astra",
+      "label": "GPT-6-astra",
+      "arms": {
+        "prompt": {
+          "accepted": 181,
+          "scored": 270,
+          "terminal": 302,
+          "target": 400,
+          "infrastructure_failure": 32,
+          "model_rejection": 89,
+          "rate": 0.6703703703703704,
+          "ci": [
+            0.6122530086099071,
+            0.7237078075360505
+          ],
+          "cost_usd": 1.794896091160221,
+          "cost_source": "astra_results_20260917.json: arms/prompt/cost_per_valid_usd; public API-equivalent pricing",
+          "public_api_equivalent_cost_usd": 1.794896091160221,
+          "measurement_source": "september-17-astra-stopped",
+          "complete": false,
+          "campaign_status": "stopped_at_user_request"
+        },
+        "feedback": {
+          "accepted": 220,
+          "scored": 265,
+          "terminal": 302,
+          "target": 400,
+          "infrastructure_failure": 37,
+          "model_rejection": 45,
+          "rate": 0.8301886792452831,
+          "ci": [
+            0.7803413843533669,
+            0.8705998832906152
+          ],
+          "cost_usd": 1.7644492181818183,
+          "cost_source": "astra_results_20260917.json: arms/feedback/cost_per_valid_usd; public API-equivalent pricing",
+          "public_api_equivalent_cost_usd": 1.7644492181818183,
+          "measurement_source": "september-17-astra-stopped",
+          "complete": false,
+          "campaign_status": "stopped_at_user_request"
+        },
+        "harness": {
+          "accepted": 140,
+          "scored": 149,
+          "terminal": 200,
+          "target": 200,
+          "infrastructure_failure": 51,
+          "model_rejection": 9,
+          "rate": 0.9395973154362416,
+          "ci": [
+            0.8891975134869227,
+            0.9678997754998474
+          ],
+          "cost_usd": 2.750799625,
+          "cost_source": "astra_results_20260917.json: arms/harness/cost_per_valid_usd; free cache reads assumed for Harness",
+          "public_api_equivalent_cost_usd": 6.027672010714285,
+          "measurement_source": "september-17-astra-stopped",
+          "complete": true,
+          "campaign_status": "stopped_at_user_request",
+          "cost_ratio_vs_prompt": 1.5325676168930107
+        }
+      }
+    },
+    {
+      "key": "sol",
+      "label": "GPT-5.6-sol",
+      "arms": {
+        "prompt": {
+          "accepted": 162,
+          "scored": 394,
+          "rate": 0.41116751269035534,
+          "ci": [
+            0.3636665921428517,
+            0.46038398477017095
+          ],
+          "cost_usd": 0.9,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "feedback": {
+          "accepted": 253,
+          "scored": 386,
+          "rate": 0.655440414507772,
+          "ci": [
+            0.6067089284049642,
+            0.7011084004793827
+          ],
+          "cost_usd": 0.8,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "harness": {
+          "accepted": 339,
+          "scored": 393,
+          "rate": 0.8625954198473282,
+          "ci": [
+            0.8250311135050236,
+            0.8931395621499479
+          ],
+          "cost_usd": 0.59,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way",
+          "cost_ratio_vs_prompt": 0.7
+        }
+      }
+    },
+    {
+      "key": "terra",
+      "label": "GPT-5.6-terra",
+      "arms": {
+        "prompt": {
+          "accepted": 160,
+          "scored": 400,
+          "rate": 0.4,
+          "ci": [
+            0.35316069336620937,
+            0.44874183475372675
+          ],
+          "cost_usd": 0.13,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "feedback": {
+          "accepted": 207,
+          "scored": 389,
+          "rate": 0.532133676092545,
+          "ci": [
+            0.482476229682381,
+            0.5811626517395458
+          ],
+          "cost_usd": 0.15,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "harness": {
+          "accepted": 185,
+          "scored": 200,
+          "rate": 0.925,
+          "ci": [
+            0.8799554020266798,
+            0.9540254929427476
+          ],
+          "cost_usd": 0.09,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way",
+          "cost_ratio_vs_prompt": 0.7
+        }
+      }
+    },
+    {
+      "key": "gemini38",
+      "label": "Gemini-3.8-Flash",
+      "arms": {
+        "prompt": {
+          "accepted": 102,
+          "scored": 389,
+          "terminal": 400,
+          "target": 400,
+          "infrastructure_failure": 10,
+          "provider_refusal": 1,
+          "model_rejection": 287,
+          "rate": 0.2622107969151671,
+          "ci": [
+            0.22097979089217606,
+            0.3080923173436298
+          ],
+          "cost_usd": 0.27984615588235295,
+          "cost_ratio_vs_prompt": null,
+          "cost_source": "cost audit of 2026-09-14, cells/gemini38/prompt; recorded cache reads priced at the cache-read rate",
+          "measurement_source": "september-14-checkpoint",
+          "cohorts": [
+            "gemini-prompt"
+          ],
+          "complete": true
+        },
+        "feedback": {
+          "accepted": 221,
+          "scored": 371,
+          "terminal": 400,
+          "target": 400,
+          "infrastructure_failure": 27,
+          "provider_refusal": 2,
+          "model_rejection": 150,
+          "rate": 0.5956873315363881,
+          "ci": [
+            0.5450158224578732,
+            0.644397590411067
+          ],
+          "cost_usd": 0.20439635565610859,
+          "cost_ratio_vs_prompt": null,
+          "cost_source": "cost audit of 2026-09-14, cells/gemini38/feedback; recorded cache reads priced at the cache-read rate",
+          "measurement_source": "september-14-checkpoint",
+          "cohorts": [
+            "gemini-feedback"
+          ],
+          "complete": true
+        },
+        "harness": {
+          "accepted": 105,
+          "scored": 162,
+          "terminal": 200,
+          "target": 200,
+          "infrastructure_failure": 38,
+          "provider_refusal": 0,
+          "model_rejection": 57,
+          "rate": 0.6481481481481481,
+          "ci": [
+            0.5719549443138812,
+            0.7174781102511842
+          ],
+          "cost_usd": 0.16,
+          "cost_ratio_vs_prompt": 0.5717427116178213,
+          "cost_source": "cost audit of 2026-09-14, cells/gemini38/harness; Experiment-running agent calculation with cache records, supplied by the authors on 2026-09-14.",
+          "measurement_source": "september-14-checkpoint",
+          "cohorts": [
+            "gemini-harness"
+          ],
+          "complete": true
+        }
+      }
+    },
+    {
+      "key": "luna",
+      "label": "GPT-5.6-luna",
+      "arms": {
+        "prompt": {
+          "accepted": 69,
+          "scored": 400,
+          "rate": 0.1725,
+          "ci": [
+            0.13863464284363428,
+            0.21259613674915653
+          ],
+          "cost_usd": 0.02,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "feedback": {
+          "accepted": 103,
+          "scored": 388,
+          "rate": 0.2654639175257732,
+          "ci": [
+            0.2239798634528715,
+            0.31154673709183833
+          ],
+          "cost_usd": 0.03,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "harness": {
+          "accepted": 167,
+          "scored": 200,
+          "rate": 0.835,
+          "ci": [
+            0.7773410172613647,
+            0.8800321587733603
+          ],
+          "cost_usd": 0.01,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way",
+          "cost_ratio_vs_prompt": 0.4
+        }
+      }
+    },
+    {
+      "key": "dsv4",
+      "label": "DeepSeek-V4-Flash",
+      "arms": {
+        "prompt": {
+          "accepted": 14,
+          "scored": 397,
+          "rate": 0.03526448362720403,
+          "ci": [
+            0.021120358027973463,
+            0.05831650680841079
+          ],
+          "cost_usd": 0.08,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "feedback": {
+          "accepted": 46,
+          "scored": 381,
+          "rate": 0.12073490813648294,
+          "ci": [
+            0.0917483989585341,
+            0.1572932846848142
+          ],
+          "cost_usd": 0.06,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way"
+        },
+        "harness": {
+          "accepted": 178,
+          "scored": 200,
+          "rate": 0.89,
+          "ci": [
+            0.8390720169908702,
+            0.9262280983928396
+          ],
+          "cost_usd": 0.02,
+          "cost_source": "Previously reported Table 1 value; retained at published precision.",
+          "measurement_source": "legacy-three-way",
+          "cost_ratio_vs_prompt": 0.2,
+          "cost_ratio_label": "0.25",
+          "cost_ratio_label_note": "Table 2 prints 0.25x, the ratio of the rounded costs 0.02 / 0.08; cost_ratio_vs_prompt keeps the stored one-decimal value."
+        }
+      }
+    },
+    {
+      "key": "grok",
+      "label": "Grok 4.6",
+      "arms": {
+        "prompt": {
+          "accepted": 183,
+          "scored": 400,
+          "rate": 0.4575,
+          "ci": [
+            0.40931270985864554,
+            0.5064958645923273
+          ],
+          "cost_usd": 0.59,
+          "cost_source": "cost audit of 2026-09-14, cells/grok/prompt; Original published Table 1 baseline retained at the authors' request.",
+          "measurement_source": "legacy-three-way",
+          "measurement_model": "Grok 4.5",
+          "reuse_note": "Usable rates, intervals, and original published costs retained at the authors' instruction."
+        },
+        "feedback": {
+          "accepted": 265,
+          "scored": 398,
+          "rate": 0.6658291457286433,
+          "ci": [
+            0.6180960507749584,
+            0.7103915921171664
+          ],
+          "cost_usd": 0.69,
+          "cost_source": "cost audit of 2026-09-14, cells/grok/feedback; Original published Table 1 baseline retained at the authors' request.",
+          "measurement_source": "legacy-three-way",
+          "measurement_model": "Grok 4.5",
+          "reuse_note": "Usable rates, intervals, and original published costs retained at the authors' instruction."
+        },
+        "harness": {
+          "accepted": 135,
+          "scored": 157,
+          "terminal": 194,
+          "target": 200,
+          "infrastructure_failure": 37,
+          "provider_refusal": 0,
+          "model_rejection": 22,
+          "rate": 0.8598726114649682,
+          "ci": [
+            0.7969485978007499,
+            0.9056065818682698
+          ],
+          "cost_usd": 0.44,
+          "cost_ratio_vs_prompt": 0.7457627118644068,
+          "cost_source": "cost audit of 2026-09-14, cells/grok/harness; Experiment-running agent calculation with cache records, supplied by the authors on 2026-09-14.",
+          "measurement_source": "september-14-checkpoint",
+          "cohorts": [
+            "grok-harness-subscription",
+            "grok-harness-proxy"
+          ],
+          "complete": false
+        }
+      }
+    }
+  ]
+}

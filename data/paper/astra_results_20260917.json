@@ -1,0 +1,62 @@
+{
+  "status": "stopped_at_user_request",
+  "date": "2026-09-17",
+  "original_targets": {
+    "prompt": 400,
+    "feedback": 400,
+    "harness": 200
+  },
+  "arms": {
+    "prompt": {
+      "finished": 302,
+      "infra_failures": 32,
+      "evaluable": 270,
+      "valid": 181,
+      "raw_pass_rate": 0.5993377483443708,
+      "pass_rate_excluding_infra": 0.6703703703703704,
+      "model_cost_excluding_infra_usd": 324.8761925,
+      "cost_per_valid_usd": 1.794896091160221,
+      "public_api_equivalent_excluding_infra_usd": 324.8761925
+    },
+    "feedback": {
+      "finished": 302,
+      "infra_failures": 37,
+      "evaluable": 265,
+      "valid": 220,
+      "raw_pass_rate": 0.7284768211920529,
+      "pass_rate_excluding_infra": 0.8301886792452831,
+      "model_cost_excluding_infra_usd": 388.178828,
+      "cost_per_valid_usd": 1.7644492181818183,
+      "public_api_equivalent_excluding_infra_usd": 388.178828
+    },
+    "harness": {
+      "finished": 200,
+      "infra_failures": 51,
+      "evaluable": 149,
+      "valid": 140,
+      "raw_pass_rate": 0.7,
+      "pass_rate_excluding_infra": 0.9395973154362416,
+      "model_cost_excluding_infra_usd": 385.1119475,
+      "cost_per_valid_usd": 2.750799625,
+      "public_api_equivalent_excluding_infra_usd": 843.8740815
+    }
+  },
+  "assumptions": [
+    "Harness cache reads priced at zero per the authors' instruction; not independently verified provider billing",
+    "Prompt and feedback use public standard API rates: ordinary input 10, reads 1, writes 12.5, output 50 USD per million tokens",
+    "Harness retains ordinary input 10, writes 12.5, output 50 USD per million tokens",
+    "Costs and primary pass rates exclude infrastructure-failed assignments",
+    "Ordinary quality failures and repair rounds remain included",
+    "Feedback includes its paired prompt seed; arm totals overlap and must not be summed",
+    "Reasoning is included in output, not charged separately",
+    "Usage gaps, recovery/qualification probes, infrastructure and monitoring chat excluded"
+  ],
+  "usage_coverage": {
+    "unique_metered_responses_all_arms": 9220,
+    "transport_errors_without_usage": 130
+  },
+  "pricing_sources": [
+    "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "https://developers.openai.com/api/docs/guides/prompt-caching"
+  ]
+}

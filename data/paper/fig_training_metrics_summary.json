@@ -1,0 +1,47 @@
+{
+  "source": {
+    "path": "plots/qwen36-rollout-metrics-v2.csv",
+    "note": "Tmax steps 163-200 are extrapolated (log-linear fit to steps 93-162); pooled statistics use measured steps only."
+  },
+  "definitions": {
+    "accepted_fraction": "Sum of accepted groups divided by sum of collected groups over all logged steps; not the arithmetic mean of per-step fractions.",
+    "collection_minutes": "Arithmetic mean of the exported rollout_collection_minutes field. This is not an estimate of total training cost.",
+    "plot": "Faint per-step values and solid trailing arithmetic means: 3 steps for useful rate, 5 for collection time. The first full windows end at steps 2 and 4. Tmax steps 163-200 are extrapolated (log-linear fit to steps 93-162); no confidence bands.",
+    "hardware": "The authors confirmed matched hardware and rollout concurrency on 2026-09-17.",
+    "timer_scope": "Exact timer boundaries and inclusion of environment-generation time are not specified in the CSV."
+  },
+  "runs": {
+    "tmax": {
+      "steps": 163,
+      "first_step": 0,
+      "last_step": 162,
+      "accepted_groups": 2608,
+      "collected_groups": 26807,
+      "accepted_fraction": 0.09728802178535458,
+      "mean_groups_per_step": 164.46012269938652,
+      "mean_collection_minutes": 82.47688298827543
+    },
+    "AutoEnvScaling": {
+      "steps": 201,
+      "first_step": 0,
+      "last_step": 200,
+      "accepted_groups": 3216,
+      "collected_groups": 11317,
+      "accepted_fraction": 0.28417425112662364,
+      "mean_groups_per_step": 56.30348258706468,
+      "mean_collection_minutes": 53.88828079799754
+    }
+  },
+  "matched_steps_0_162": {
+    "tmax": {
+      "accepted_fraction": 0.09728802178535458,
+      "mean_collection_minutes": 82.47688298827543
+    },
+    "AutoEnvScaling": {
+      "accepted_fraction": 0.301398358950653,
+      "mean_collection_minutes": 47.56308496353693
+    },
+    "useful_rate_ratio": 3.098000693401133,
+    "collection_time_reduction": 0.42331616763089486
+  }
+}
