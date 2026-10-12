@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="AutoEnvScaling logo" width="180" />
+</p>
+
 <h1 align="center">AutoEnvScaling</h1>
 
 <h3 align="center">Automating the Data Flywheel with Terminal Agents</h3>
