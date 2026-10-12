@@ -56,7 +56,8 @@ def cmd_seed(args: argparse.Namespace) -> int:
 
 def cmd_prompts(args: argparse.Namespace) -> int:
     pool = Pool.load(args.pool_dir, capacity=args.capacity or _settings(args).selfplay.pool_size)
-    n = pool.export_prompt_data(args.out)
+    images = json.loads(args.images.read_text()) if args.images else None
+    n = pool.export_prompt_data(args.out, images=images)
     print(json.dumps({"rows": n, "out": str(args.out)}))
     return 0
 
@@ -147,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pool-dir", type=Path, required=True)
     p.add_argument("--capacity", type=int)
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--images", type=Path,
+                   help="JSON mapping task ids to built environment images (carry mode)")
     p.set_defaults(fn=cmd_prompts)
 
     p = sub.add_parser("schedule", help="print the training schedule")

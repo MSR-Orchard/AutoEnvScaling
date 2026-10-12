@@ -363,11 +363,17 @@ class Pool:
         return self.apply_review(reports, step, require_variance=require_variance)
 
     # ---- export --------------------------------------------------------------------------
-    def export_prompt_data(self, path: Path) -> int:
-        """Write the active pool as Miles prompt rows (atomically). Returns the row count."""
+    def export_prompt_data(self, path: Path, images: dict[str, str] | None = None) -> int:
+        """Write the active pool as Miles prompt rows (atomically). Returns the row count.
+
+        ``images`` maps task ids to built environment images; carry mode starts each episode's
+        sandbox from ``metadata["image"]`` and refuses rows without one.
+        """
         rows = []
         for entry in sorted(self.active(), key=lambda e: e.task_id):
             task = self.task(entry)
-            rows.append(solver_prompt_row(task, task_id=entry.task_id,
-                                          metadata={"source": entry.source}))
+            metadata = {"source": entry.source}
+            if images and entry.task_id in images:
+                metadata["image"] = images[entry.task_id]
+            rows.append(solver_prompt_row(task, task_id=entry.task_id, metadata=metadata))
         return write_jsonl_atomic(path, rows)

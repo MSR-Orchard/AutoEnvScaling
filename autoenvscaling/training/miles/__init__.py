@@ -7,11 +7,20 @@
     rollout.py    the Miles rollout function for bridge mode
     hooks.py      the reward post-process: group-mean-centred advantages
 
-`python -m autoenvscaling.training.miles --help` prints or runs a configured job.
+Carry mode (partial rollout and over-sampling, the paper's solver-training loop) lives in
+`autoenvscaling.training.carry`. `python -m autoenvscaling.training.miles --help` prints or
+runs a configured job.
 """
 
-from autoenvscaling.training.miles.config import BRIDGE, GENERATE_FN, PRESETS, SFT, MilesConfig
+from autoenvscaling.training.miles.config import (
+    BRIDGE,
+    CARRY,
+    GENERATE_FN,
+    PRESETS,
+    SFT,
+    MilesConfig,
+)
 from autoenvscaling.training.miles.launcher import MilesLauncher, TrainingResult, latest_checkpoint
 
-__all__ = ["BRIDGE", "GENERATE_FN", "PRESETS", "SFT", "MilesConfig", "MilesLauncher",
+__all__ = ["BRIDGE", "CARRY", "GENERATE_FN", "PRESETS", "SFT", "MilesConfig", "MilesLauncher",
            "TrainingResult", "latest_checkpoint"]

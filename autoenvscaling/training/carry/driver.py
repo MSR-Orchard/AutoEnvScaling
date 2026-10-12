@@ -1,0 +1,683 @@
+"""The episode driver: Pi in a sandbox of the task's image, talking to the recording proxy.
+
+Each episode gets its own container started from the environment's image (``metadata["image"]``
+of the prompt row). Pi is installed into it, pointed at the proxy's per-episode route
+``/v1/ep/<episode_id>`` (episode identity comes from the path: sandboxes behind NAT are not
+distinguishable by address), and launched once with the instruction on stdin. The driver never
+polls the sandbox while Pi runs: it waits on the exec that will return when Pi exits.
+
+The park model
+--------------
+Pi owns its loop and cannot be resumed without a new message (measured on the research runs:
+``--continue`` and ``--session`` load the session and exit without generating), and a new user
+turn would be a train/eval mismatch. So a park never kills Pi. The driver closes the episode's
+gate at the proxy; Pi blocks inside its in-flight HTTP call while the weights swap; the next
+rollout reopens the gate when Miles admits the episode again. ``run_turns`` therefore rejoins
+the running Pi on a resume instead of launching a second one.
+
+Verification runs the task's ``tests/test.sh`` inside the same container after Pi finished (the
+Harbor convention: the verifier writes ``/logs/verifier/reward.txt`` or ``reward.json``), and
+the reward is the fraction of tests that passed, as everywhere else in this repository.
+
+This is the research run's ``pi_driver.py`` on the release's sandbox interface
+(``autoenvscaling.sandbox``) instead of its sandbox service.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import os
+import re
+import shlex
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+from collections.abc import Callable
+from concurrent.futures import Future
+from pathlib import Path
+from typing import Any
+
+from autoenvscaling.sandbox.base import (
+    ExecResult,
+    Sandbox,
+    SandboxBackend,
+    SandboxSpec,
+    get_backend,
+)
+from autoenvscaling.training.carry.episode import (
+    EpisodeActiveBudgetExpired,
+    TurnOutcome,
+    TurnStatus,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_PI_PACKAGE = "@mariozechner/pi-coding-agent"
+SESSION_DIR = "$HOME/.pi-sessions"
+PI_OUTPUT = "/tmp/pi_out.json"
+ABORT_POLL_S = float(os.environ.get("AES_CARRY_ABORT_POLL_S", "5"))
+INSTALL_CONCURRENCY = int(os.environ.get("AES_CARRY_INSTALL_CONCURRENCY", "64"))
+INSTALL_RETRIES = 3
+
+_PI_BOOTSTRAP = (
+    "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash >/dev/null 2>&1 && "
+    ". ~/.nvm/nvm.sh && nvm install 22 >/dev/null 2>&1 && "
+    "npm install -g {package} >/dev/null 2>&1 && pi --version"
+)
+
+# Pi's JSON print mode can exit zero after an assistant error. Inspect its final events inside
+# the sandbox; only a small JSON summary leaves it.
+_PI_COMPLETION_CHECK = r'''
+import json, re
+last = {}
+ended = False
+with open('/tmp/pi_out.json') as stream:
+    for line in stream:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get('type') == 'agent_start':
+            ended = False
+        elif event.get('type') == 'agent_end':
+            ended = True
+        elif event.get('type') == 'message_end':
+            message = event.get('message') or {}
+            if message.get('role') == 'assistant':
+                last = message
+error = str(last.get('errorMessage') or '')
+status = re.search(r'\b([45][0-9]{2})\b', error)
+reason = last.get('stopReason')
+print(json.dumps({
+    'agent_ended': ended,
+    'stop_reason': reason if reason in ('stop', 'length', 'toolUse', 'error', 'aborted') else 'unknown',
+    'assistant_error': bool(error),
+    'content_blocks': len(last.get('content') or []),
+    'http_status': int(status[1]) if status else None,
+}))
+'''
+
+
+# ---- the proxy as seen from the driver ---------------------------------------------------------------
+class ProxyClient:
+    """Control and recording endpoints of ``training.carry.proxy`` (synchronous; call off-loop)."""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+
+    def _request(self, method: str, path: str, body: dict | None = None, timeout: float = 60.0) -> Any:
+        data = json.dumps(body).encode() if body is not None else (b"{}" if method == "POST" else None)
+        req = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read()
+        return json.loads(raw) if raw else {}
+
+    def configure(self, sglang_url: str, served_id: str, max_turns: int, max_context: int) -> dict:
+        return self._request("POST", "/config", {"sglang_url": sglang_url, "served_id": served_id,
+                                                 "max_turns": max_turns, "max_context": max_context})
+
+    def gate(self, action: str, episode_id: str) -> None:
+        self._request("POST", f"/{action}?episode_id={episode_id}")
+
+    def recording(self, episode_id: str) -> dict | None:
+        try:
+            return self._request("GET", f"/episodes/{episode_id}?full=1", timeout=120.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[pi] recording fetch failed for %s: %s", episode_id, exc)
+            return None
+
+    def delete(self, episode_id: str) -> None:
+        try:
+            self._request("DELETE", f"/episodes/{episode_id}", timeout=15.0)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (404, 410):
+                raise
+
+
+# ---- one episode's sandbox -------------------------------------------------------------------------------
+class CarrySandbox:
+    """A sandbox, its episode id, the Pi process that survives a park, and the time budget.
+
+    Active execution is bounded separately from deliberate training pauses: ``pause_execution``
+    and ``resume_execution`` (called by the registry at park/resume) stop and restart the
+    episode clock, and a finite wall backstop bounds an abandoned parked episode.
+    """
+
+    def __init__(self, sandbox: Sandbox, episode_id: str, *, loop: asyncio.AbstractEventLoop,
+                 release: Callable[[], None], proxy: ProxyClient, max_paused_s: float):
+        self.sandbox = sandbox
+        self.episode_id = episode_id
+        self.created_at = time.monotonic()
+        self.deadline: float | None = None
+        self.max_paused_seconds = max_paused_s
+        self._loop = loop
+        self._release = release
+        self._proxy = proxy
+        self._budget_lock = threading.RLock()
+        self._paused_at: float | None = None
+        self._paused_seconds = 0.0
+        self.waiter: asyncio.Task | None = None
+        self._close_lock = threading.Lock()
+        self._close_future: Future | None = None
+        self.terminated = False
+        self.recording_deleted = False
+
+    # ---- budget --------------------------------------------------------------------------------
+    def pause_execution(self) -> None:
+        with self._budget_lock:
+            if self._paused_at is None:
+                self._paused_at = time.monotonic()
+
+    def resume_execution(self) -> None:
+        with self._budget_lock:
+            if self._paused_at is not None:
+                duration = time.monotonic() - self._paused_at
+                self._paused_seconds += duration
+                if self.deadline is not None:
+                    self.deadline += duration
+                self._paused_at = None
+
+    def wall_remaining(self, timeout_s: float) -> float:
+        return self.created_at + timeout_s + self.max_paused_seconds - time.monotonic()
+
+    def episode_remaining(self, timeout_s: float) -> float:
+        with self._budget_lock:
+            if self.deadline is None:
+                self.deadline = self.created_at + timeout_s + self._paused_seconds
+            now = time.monotonic()
+            clock = self._paused_at if self._paused_at is not None else now
+            paused = self._paused_seconds + (now - clock)
+            if paused >= self.max_paused_seconds:
+                return 0.0
+            return min(self.deadline - clock, self.wall_remaining(timeout_s))
+
+    def episode_expired(self, timeout_s: float) -> bool:
+        return self.episode_remaining(timeout_s) <= 0
+
+    def expiry_reason(self, timeout_s: float) -> str | None:
+        with self._budget_lock:
+            now = time.monotonic()
+            if self.created_at + timeout_s + self.max_paused_seconds <= now:
+                return "wall"
+            clock = self._paused_at if self._paused_at is not None else now
+            if self._paused_seconds + now - clock >= self.max_paused_seconds:
+                return "paused"
+            if self.deadline is not None and self.deadline <= clock:
+                return "active"
+            return None
+
+    # ---- liveness and cleanup ----------------------------------------------------------------
+    def heartbeat(self) -> bool | None:
+        """True: alive. False: confirmed gone. None: unknown (keep ownership)."""
+        with self._close_lock:
+            if self._close_future is not None:
+                return None
+        try:
+            if asyncio.get_running_loop() is self._loop:
+                return None   # a blocking wait here would deadlock the rollout loop
+        except RuntimeError:
+            pass              # not on an event loop: the heartbeat thread
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.sandbox.exec("true", timeout_s=30), self._loop)
+            result = future.result(timeout=60)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[pi] heartbeat unknown for %s: %s", self.episode_id, exc)
+            return None
+        if result.returncode == 0:
+            return True
+        text = (result.stderr or "") + (result.stdout or "")
+        if re.search(r"No such container|is not running|not found|has been terminated", text, re.IGNORECASE):
+            return False
+        return None
+
+    def close(self) -> Future:
+        """Start idempotent cleanup from any thread; the future resolves once confirmed."""
+        with self._close_lock:
+            if self._close_future is None:
+                self._close_future = Future()
+                self._attempt = 0
+                waiter = self.waiter
+                if waiter is not None and not self._loop.is_closed():
+                    self._loop.call_soon_threadsafe(waiter.cancel)
+                if not self._loop.is_closed():
+                    asyncio.run_coroutine_threadsafe(self._close(), self._loop)
+            return self._close_future
+
+    async def _close(self) -> None:
+        errors = []
+        if not self.terminated:
+            try:
+                await self.sandbox.terminate()
+                self.terminated = True
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        if not self.recording_deleted:
+            try:
+                await asyncio.to_thread(self._proxy.delete, self.episode_id)
+                self.recording_deleted = True
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        if errors:
+            self._attempt += 1
+            delay = min(30.0, 2 ** min(self._attempt - 1, 5))
+            logger.warning("[pi] cleanup pending for %s (attempt %d): %s", self.episode_id,
+                           self._attempt, "; ".join(errors))
+            await asyncio.sleep(delay)
+            asyncio.ensure_future(self._close())
+            return
+        self._release()
+        self._close_future.set_result(None)
+
+
+# ---- the driver ---------------------------------------------------------------------------------------
+class SandboxEpisodeDriver:
+    """``EpisodeDriver`` over ``autoenvscaling.sandbox`` backends."""
+
+    def __init__(self, settings: Any, args: Any, *, backend: SandboxBackend | None = None,
+                 proxy: ProxyClient | None = None):
+        self.settings = settings
+        self.args = args
+        self.backend = backend or get_backend(settings.sandbox_backend)
+        self.proxy = proxy or ProxyClient(settings.proxy_url)
+        if not settings.proxy_public_url:
+            raise RuntimeError("proxy_public_url is unset; Pi inside a sandbox cannot reach the "
+                               "trainer's loopback")
+        self.public_url = settings.proxy_public_url.rstrip("/")
+        self.max_turns = int(settings.max_turns)
+        self.pi_package = f"{DEFAULT_PI_PACKAGE}@{settings.pi_version}" if settings.pi_version else _default_pi_package()
+        self._live = threading.Semaphore(int(settings.max_live_sandboxes))
+        self._install_sem = asyncio.Semaphore(INSTALL_CONCURRENCY)
+        self._pending: set[CarrySandbox] = set()
+        self._pending_lock = threading.Lock()
+        self._proxy_configured = False
+        self.__tokenizer = None
+        self.__tokenizer_tried = False
+
+    # ---- accounting ------------------------------------------------------------------------------
+    def pending_cleanup_count(self) -> int:
+        with self._pending_lock:
+            return len(self._pending)
+
+    async def wait_cleanup(self, timeout_s: float) -> None:
+        with self._pending_lock:
+            pending = list(self._pending)
+        futures = [asyncio.wrap_future(sb.close()) for sb in pending]
+        if futures:
+            await asyncio.wait(futures, timeout=timeout_s)
+
+    def _release_slot(self, sb: CarrySandbox) -> None:
+        with self._pending_lock:
+            self._pending.discard(sb)
+        self._live.release()
+
+    @property
+    def tokenizer(self):
+        """Tokenizer for reseeding an empty sample's prompt; lazy and never fatal."""
+        if self.__tokenizer is None and not self.__tokenizer_tried:
+            self.__tokenizer_tried = True
+            path = getattr(self.args, "hf_checkpoint", None)
+            try:
+                from transformers import AutoTokenizer
+                self.__tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[pi] could not load the reseed tokenizer from %s: %s", path, exc)
+        return self.__tokenizer
+
+    async def reap_orphans(self) -> int:
+        """Remove sandboxes a previous process of this run left behind (not resumable)."""
+        reaper = getattr(self.backend, "remove_by_prefix", None)
+        if reaper is None:
+            logger.info("[pi] backend %s cannot list sandboxes; orphans of a previous process "
+                        "must be removed by hand (prefix %s-)", getattr(self.backend, "name", "?"),
+                        self.settings.run_id)
+            return 0
+        return int(await reaper(f"{self.settings.run_id}-"))
+
+    # ---- sandbox -----------------------------------------------------------------------------------
+    def _meta(self, sample: Any) -> dict:
+        return dict(getattr(sample, "metadata", None) or {})
+
+    def _timeout(self) -> float:
+        return float(self.settings.episode_timeout_s)
+
+    def _remaining(self, sb: CarrySandbox) -> float:
+        remaining = sb.episode_remaining(self._timeout())
+        if remaining <= 0:
+            reason = sb.expiry_reason(self._timeout())
+            if reason == "active":
+                raise EpisodeActiveBudgetExpired("Pi active execution budget exhausted")
+            raise TimeoutError(f"episode {reason or 'unknown'} lifetime budget exhausted")
+        return remaining
+
+    def _point_proxy_at_engines(self) -> None:
+        """Tell the proxy which engines serve, once per process: the router address only exists
+        once the job runs, and a stale backend would record a different model's log-probabilities."""
+        if self._proxy_configured:
+            return
+        ip = getattr(self.args, "sglang_router_ip", None)
+        port = getattr(self.args, "sglang_router_port", None)
+        if not ip or not port:
+            logger.warning("[pi] no router on args; leaving the proxy backend as it is")
+            self._proxy_configured = True
+            return
+        try:
+            info = self.proxy.configure(f"http://{ip}:{port}", self.settings.served_model, self.max_turns,
+                                        int(getattr(self.args, "rollout_max_context_len", 98304)))
+        except Exception as exc:
+            raise RuntimeError(f"could not point the proxy at the engines ({exc}); refusing to run "
+                               "episodes against an unknown backend") from exc
+        logger.info("[pi] proxy backend set to %s", info)
+        self._proxy_configured = True
+
+    async def create_sandbox(self, sample: Any) -> CarrySandbox:
+        await asyncio.to_thread(self._point_proxy_at_engines)
+        meta = self._meta(sample)
+        image = meta.get("image") or ""
+        if not image:
+            raise ValueError("prompt row carries no image; cannot start a sandbox")
+        episode_id = f"ep-{uuid.uuid4().hex[:20]}"
+        # Admission on the event loop, never inside an executor thread.
+        while not self._live.acquire(blocking=False):
+            await asyncio.sleep(0.5)
+        loop = asyncio.get_running_loop()
+        released = False
+
+        def release_once():
+            nonlocal released
+            if not released:
+                released = True
+                self._release_slot(sb_holder[0])
+
+        sb_holder: list[CarrySandbox] = []
+        spec = SandboxSpec(image=image, cpu=int(self.settings.sandbox_cpu),
+                           memory_gib=int(self.settings.sandbox_memory_gib),
+                           timeout_s=int(self._timeout() + self.settings.max_paused_s + 600),
+                           workdir=meta.get("workdir") or "/app",
+                           name=f"{self.settings.run_id}-{episode_id}")
+        try:
+            sandbox = await self.backend.create(spec)
+        except BaseException:
+            self._live.release()
+            raise
+        sb = CarrySandbox(sandbox, episode_id, loop=loop, release=release_once, proxy=self.proxy,
+                          max_paused_s=float(self.settings.max_paused_s))
+        sb_holder.append(sb)
+        sb.deadline = sb.created_at + self._timeout()
+        with self._pending_lock:
+            self._pending.add(sb)
+        logger.info("[carry] sandbox episode=%s image=%s", episode_id, image)
+        try:
+            await asyncio.wait_for(self._install_pi(sb), self._remaining(sb))
+        except BaseException:
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(sb.close())), 30)
+            except Exception:  # noqa: BLE001
+                logger.warning("[pi] release after failed setup did not complete")
+            raise
+        return sb
+
+    async def _install_pi(self, sb: CarrySandbox) -> None:
+        async with self._install_sem:
+            for attempt in range(INSTALL_RETRIES):
+                probe = await sb.sandbox.exec(
+                    "bash", "-lc",
+                    "command -v curl >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq "
+                    "curl ca-certificates >/dev/null 2>&1); command -v curl", timeout_s=600)
+                if probe.returncode == 0:
+                    break
+                logger.warning("[pi] curl unavailable (attempt %d/%d) for %s", attempt + 1,
+                               INSTALL_RETRIES, sb.episode_id)
+                await asyncio.sleep(2 ** attempt)
+            else:
+                raise RuntimeError(f"pi install failed: curl still missing after {INSTALL_RETRIES} attempts")
+            res = await sb.sandbox.exec("bash", "-lc", _PI_BOOTSTRAP.format(package=self.pi_package),
+                                        timeout_s=1200)
+        if res.returncode != 0:
+            detail = (res.stderr or "").strip() or (res.stdout or "").strip()
+            raise RuntimeError(f"pi install failed (rc={res.returncode}): {detail[:300] or '<no output>'}")
+        models = {"providers": {"openai": {
+            "baseUrl": f"{self.public_url}/v1/ep/{sb.episode_id}",
+            "api": "openai-completions", "apiKey": "$OPENAI_API_KEY", "authHeader": True,
+            "compat": {"supportsStore": False, "supportsDeveloperRole": False,
+                       "supportsReasoningEffort": False, "supportsUsageInStreaming": False,
+                       "maxTokensField": "max_tokens", "supportsStrictMode": False},
+            "models": [{"id": self.settings.served_model, "name": "policy", "api": "openai-completions",
+                        "reasoning": True, "input": ["text"],
+                        "contextWindow": int(getattr(self.args, "rollout_max_context_len", 98304)),
+                        "maxTokens": int(getattr(self.args, "rollout_max_response_len", 16384)),
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}
+        payload = json.dumps(models, indent=2)
+        plant = ('mkdir -p "$HOME/.pi/agent"; cat > "$HOME/.pi/agent/models.json" <<\'PI_MODELS_EOF\'\n'
+                 f"{payload}\nPI_MODELS_EOF\n"
+                 'grep -q "/v1/ep/" "$HOME/.pi/agent/models.json" || { echo "PLANT FAIL" >&2; exit 1; }; '
+                 "echo PLANT_OK")
+        res = await sb.sandbox.exec("bash", "-lc", plant, timeout_s=120)
+        if "PLANT_OK" not in (res.stdout or ""):
+            raise RuntimeError(f"models.json plant failed: {res.stdout} {res.stderr}")
+
+    # ---- turns ---------------------------------------------------------------------------------------
+    async def run_turns(self, *, sample: Any, sandbox: CarrySandbox, turn_state: Any,
+                        sampling_params: dict, should_abort: Callable[[], bool],
+                        start_turn_index: int) -> TurnOutcome:
+        if should_abort():
+            return TurnOutcome(TurnStatus.ABORTED, {"turn": start_turn_index}, start_turn_index)
+        self._remaining(sandbox)
+        if sandbox.waiter is not None:
+            # A resume: rejoin the running Pi rather than fork the episode.
+            if not sandbox.waiter.done():
+                await self._gate("unpark", sandbox.episode_id)
+            parked = await self._await_pi(sandbox, should_abort, self._remaining(sandbox), sandbox.waiter)
+            return await self._finish(sample, sandbox, parked)
+
+        instruction = self._meta(sample).get("instruction") or _prompt_text(sample)
+        prompt_path = f"/tmp/aes_pi_prompt_{sandbox.episode_id}.txt"
+        # The task text never appears in a long-lived process's argv (a task's own `pkill -f`
+        # could match it); it is staged in a file and read on stdin, Pi's native interface.
+        await sandbox.sandbox.write_file(prompt_path, instruction.encode("utf-8"))
+        launch = (f"mkdir -p {SESSION_DIR}; . ~/.nvm/nvm.sh; "
+                  f"{{ rm -f {shlex.quote(prompt_path)} || exit $?; "
+                  f"pi --print --mode json --session-dir {SESSION_DIR} --provider openai "
+                  f"--model {shlex.quote(self.settings.served_model)} > {PI_OUTPUT} 2>&1; rc=$?; "
+                  f"echo EXIT=$rc; exit $rc; }} < {shlex.quote(prompt_path)}")
+        key = os.environ.get(self.settings.proxy_api_key_env, "") or "proxy"
+        exec_timeout = int(sandbox.wall_remaining(self._timeout()))
+        waiter = asyncio.create_task(sandbox.sandbox.exec("bash", "-lc", launch, timeout_s=exec_timeout,
+                                                          env={"OPENAI_API_KEY": key}))
+        sandbox.waiter = waiter
+        parked = await self._await_pi(sandbox, should_abort, self._remaining(sandbox), waiter)
+        return await self._finish(sample, sandbox, parked)
+
+    async def _gate(self, action: str, episode_id: str) -> None:
+        """park/unpark THIS episode's gate (the global gate belongs to the rollout cut)."""
+        try:
+            await asyncio.to_thread(self.proxy.gate, action, episode_id)
+        except Exception as exc:
+            logger.error("[pi] proxy %s(%s) failed: %s", action, episode_id, exc)
+            raise
+
+    async def _await_pi(self, sandbox: CarrySandbox, should_abort: Callable[[], bool], timeout: float,
+                        waiter: asyncio.Task) -> bool:
+        """Wait for Pi without polling the sandbox. True means parked (Pi still alive)."""
+        deadline = min(sandbox.deadline or float("inf"), time.monotonic() + timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._remaining(sandbox)   # raises the budget error with its reason
+                raise TimeoutError("Pi wait deadline exhausted")
+            done, _ = await asyncio.wait({waiter}, timeout=min(ABORT_POLL_S, remaining))
+            if done:
+                if waiter.cancelled():
+                    raise RuntimeError("Pi waiter was cancelled before completion")
+                result: ExecResult = waiter.result()
+                if result.timed_out or result.returncode:
+                    raise RuntimeError(f"Pi process failed (rc={result.returncode}, "
+                                       f"timed_out={result.timed_out}): {result.stderr or result.stdout}")
+                return False
+            if should_abort():
+                await self._gate("park", sandbox.episode_id)
+                return True
+
+    async def _finish(self, sample: Any, sandbox: CarrySandbox, parked: bool) -> TurnOutcome:
+        rec = await asyncio.to_thread(self.proxy.recording, sandbox.episode_id)
+        if parked:
+            turns = int((rec or {}).get("turns") or 0)
+            if rec and rec.get("n_tokens", 0) > rec.get("prompt_len", 0):
+                self._apply_recording(sample, rec)
+            return TurnOutcome(TurnStatus.ABORTED, {"turn": turns}, turns)
+        if rec and rec.get("error"):
+            return TurnOutcome(TurnStatus.FAILED, {}, int(rec.get("turns") or 0),
+                               error=f"proxy episode failed: {rec['error']}")
+        if rec is None or not rec.get("n_tokens"):
+            return TurnOutcome(TurnStatus.FAILED, {"turn": 0}, 0,
+                               error="proxy recorded no tokens for this episode")
+        terminal = await self._completion_status(sandbox)
+        md = getattr(sample, "metadata", None)
+        if md is None:
+            sample.metadata = md = {}
+        md["pi_terminal_status"] = terminal
+        bounded_stop = rec.get("stop_reason") in ("context_limit", "max_turns")
+        turns = int(rec.get("turns") or 0)
+        if (not terminal["agent_ended"] or terminal["assistant_error"]
+                or terminal["stop_reason"] not in ("stop", "length")
+                or (not terminal["content_blocks"] and not bounded_stop)):
+            return TurnOutcome(TurnStatus.FAILED, {}, turns,
+                               error=f"Pi terminal status invalid (stop_reason={terminal['stop_reason']}, "
+                                     f"agent_ended={terminal['agent_ended']}, http_status={terminal['http_status']})")
+        if not rec.get("tool_results_seen"):
+            return TurnOutcome(TurnStatus.FAILED, {"turn": turns}, turns,
+                               error="episode produced zero tool results")
+        self._apply_recording(sample, rec)
+        return TurnOutcome(TurnStatus.DONE, {"turn": turns}, turns)
+
+    async def _completion_status(self, sandbox: CarrySandbox) -> dict:
+        result = await sandbox.sandbox.exec("python3", "-I", "-c", _PI_COMPLETION_CHECK,
+                                            timeout_s=int(min(self._remaining(sandbox), 60.0)), workdir="/tmp")
+        if result.returncode or result.timed_out:
+            raise RuntimeError("could not validate Pi's final session events")
+        status = json.loads(result.stdout)
+        if (not isinstance(status.get("agent_ended"), bool)
+                or not isinstance(status.get("assistant_error"), bool)
+                or not isinstance(status.get("content_blocks"), int)
+                or status.get("stop_reason") not in ("stop", "length", "toolUse", "error", "aborted", "unknown")
+                or (status.get("http_status") is not None and not isinstance(status["http_status"], int))):
+            raise RuntimeError("invalid Pi terminal-status diagnostic")
+        return status
+
+    def _apply_recording(self, sample: Any, rec: dict) -> None:
+        """Copy the engine's own ids and log-probabilities onto the sample; nothing is recomputed."""
+        apply_recording(sample, rec, max_context=int(getattr(self.args, "rollout_max_context_len", 0) or 0))
+
+    # ---- verify ---------------------------------------------------------------------------------------
+    async def verify(self, *, sample: Any, sandbox: CarrySandbox, turn_state: Any) -> float:
+        """Score the episode, then ALWAYS release the sandbox: verify is the terminal call."""
+        try:
+            return await self._verify_inner(sample, sandbox)
+        finally:
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(sandbox.close())), 30)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[pi] sandbox release pending: %s", exc)
+
+    async def _verify_inner(self, sample: Any, sandbox: CarrySandbox) -> float:
+        task_dir = self._meta(sample).get("task_dir") or ""
+        tests = Path(task_dir) / "tests"
+        if not task_dir or not (tests / "test.sh").is_file():
+            raise RuntimeError("prompt row has no task_dir with tests/test.sh; cannot verify")
+        started = time.monotonic()
+        budget = float(self.settings.verify_timeout_s)
+
+        def remaining() -> float:
+            left = min(self._remaining(sandbox), budget - (time.monotonic() - started))
+            if left <= 0:
+                raise TimeoutError("verifier wall-clock budget exhausted")
+            return left
+
+        await sandbox.sandbox.upload_dir(tests, "/tests")
+        res = await sandbox.sandbox.exec(
+            "bash", "-lc", "mkdir -p /logs/verifier && cd /tests && bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1; "
+                           "echo RC=$?; cat /logs/verifier/reward.txt 2>/dev/null || cat /logs/verifier/reward.json 2>/dev/null",
+            timeout_s=int(remaining()))
+        if res.timed_out:
+            raise RuntimeError("verifier timed out")
+        return parse_reward_output(res.stdout or "")
+
+
+# ---- helpers ------------------------------------------------------------------------------------------------
+def apply_recording(sample: Any, rec: dict, *, max_context: int = 0) -> None:
+    """Copy a proxy recording onto a Miles sample.
+
+    Miles splits a sample into prompt and response and asserts
+    ``len(rollout_log_probs) == response_length``: the response is everything after the initial
+    prompt, generated tokens and injected tool results alike, with ``loss_mask`` deciding what
+    trains. A recording longer than the context limit is rejected rather than truncated: cutting
+    mid-turn would train on a trajectory that never happened.
+    """
+    tokens = rec.get("tokens") or []
+    logprobs = rec.get("logprobs") or []
+    loss_mask = rec.get("loss_mask") or []
+    if not (len(tokens) == len(logprobs) == len(loss_mask)):
+        raise RuntimeError(f"recording is internally inconsistent: tokens={len(tokens)} "
+                           f"logprobs={len(logprobs)} mask={len(loss_mask)}")
+    prompt_len = int(rec.get("prompt_len") or 0)
+    if prompt_len <= 0 or prompt_len >= len(tokens):
+        raise RuntimeError(f"recording has an unusable prompt_len={prompt_len} for {len(tokens)} tokens")
+    if max_context and len(tokens) > max_context:
+        raise RuntimeError(f"recording exceeds the context limit: {len(tokens)} > {max_context} tokens")
+    sample.tokens = list(tokens)
+    sample.rollout_log_probs = list(logprobs[prompt_len:])
+    sample.loss_mask = list(loss_mask[prompt_len:])
+    sample.response_length = len(tokens) - prompt_len
+    if rec.get("weight_versions") is not None and hasattr(sample, "weight_versions"):
+        sample.weight_versions = [str(v) for v in rec["weight_versions"]]
+    assert len(sample.rollout_log_probs) == sample.response_length
+
+
+def parse_reward_output(text: str) -> float:
+    """The reward from a verifier run: ``reward.txt`` (one number) or ``reward.json`` (flat mapping)."""
+    tail = text.split("RC=", 1)[1] if "RC=" in text else text
+    body = tail.split("\n", 1)[1].strip() if "\n" in tail else ""
+    if not body:
+        raise RuntimeError(f"verifier wrote no reward file: {text[-500:]}")
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = body
+    if isinstance(parsed, dict):
+        if "reward" in parsed:
+            value = parsed["reward"]
+        elif parsed and all(isinstance(v, (int, float)) for v in parsed.values()):
+            value = sum(float(v) for v in parsed.values()) / len(parsed)
+        else:
+            raise RuntimeError(f"reward.json has no numeric reward: {body[:200]}")
+    else:
+        value = float(str(parsed).strip().split()[0])
+    value = float(value)
+    if not math.isfinite(value):
+        raise RuntimeError("verifier reward is not finite")
+    return round(value, 6)
+
+
+def _prompt_text(sample: Any) -> str:
+    prompt = getattr(sample, "prompt", "")
+    if isinstance(prompt, list):
+        for m in prompt:
+            if isinstance(m, dict) and m.get("role") == "user":
+                return str(m.get("content", ""))
+        return ""
+    return str(prompt)
+
+
+def _default_pi_package() -> str:
+    try:
+        from autoenvscaling.calibration.solver import PI_VERSION
+        return f"{DEFAULT_PI_PACKAGE}@{PI_VERSION}"
+    except Exception:  # noqa: BLE001
+        return f"{DEFAULT_PI_PACKAGE}@latest"

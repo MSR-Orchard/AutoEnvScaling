@@ -148,3 +148,12 @@ def test_latest_rollout_trajectories_round_trip(tmp_path, pool):
     pool.record_rollouts(e.task_id, [traj], step=4)
     (back,) = pool.latest_rollout_trajectories(e.task_id)
     assert back == traj
+
+
+def test_export_prompt_data_adds_images_for_carry_mode(tmp_path, pool):
+    entries = [pool.admit(make_task(tmp_path, f"t{i}"), source="tmax") for i in range(2)]
+    images = {entries[0].task_id: "ghcr.io/example/t0:1"}
+    pool.export_prompt_data(tmp_path / "prompt.jsonl", images=images)
+    rows = {r["label"]: r for r in read_jsonl(tmp_path / "prompt.jsonl")}
+    assert rows[entries[0].task_id]["metadata"]["image"] == "ghcr.io/example/t0:1"
+    assert "image" not in rows[entries[1].task_id]["metadata"]

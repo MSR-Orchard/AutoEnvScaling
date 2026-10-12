@@ -44,6 +44,8 @@ def build_config(args: argparse.Namespace) -> MilesConfig:
     config = PRESETS[args.preset](**paths)
     if args.generate_fn:
         config = config.with_(mode="generate_fn")
+    if args.carry:
+        config = config.with_(mode="carry")
     if args.num_rollout is not None:
         config = config.with_(num_rollout=args.num_rollout)
     for item in args.set or []:
@@ -65,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--load")
         p.add_argument("--prompt-data")
         p.add_argument("--generate-fn", help="switch to generate_fn mode with this generate function")
+        p.add_argument("--carry", action="store_true",
+                       help="switch to carry mode (partial rollout and over-sampling; needs --prompt-data)")
         p.add_argument("--num-rollout", type=int)
         p.add_argument("--bridge-dir", help="bridge control directory (bridge mode)")
         p.add_argument("--set", action="append", metavar="NAME=VALUE")

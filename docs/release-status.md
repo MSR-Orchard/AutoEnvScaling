@@ -22,9 +22,12 @@ an author decision before the public release.
   of Claude Code, Codex, and Pi carried over from the research code.
 * Harbor trials on Modal for validation, calibration, and evaluation.
 * `harbor check` with the Terminal-Bench rubric.
-* Miles training, in particular the bridge between the self-play loop and a running Miles job.
-  Both roles currently train on re-tokenized conversations; exact token capture needs a proxy in
-  front of the rollout router, which is not in this release.
+* Miles training, in particular the bridge between the self-play loop and a running Miles job,
+  and carry mode (`autoenvscaling/training/carry/`, added 12/10/2026), which restores the
+  paper's partial rollout and over-sampling with a recording proxy in front of the router.
+  Carry mode is tested offline only (fakes for Miles, the engines and the sandboxes); see
+  `docs/partial-rollout.md` for what was verified against the final run and what still needs a
+  live run.
 
 ## Author decisions (recorded 29/09/2026)
 
