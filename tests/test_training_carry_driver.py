@@ -89,6 +89,7 @@ class FakeBackend:
         self.created = []
         self.live = {}
         self.removed = []
+        self.fail_removals = False
 
     async def create(self, spec):
         sb = FakeSandbox(spec)
@@ -98,6 +99,8 @@ class FakeBackend:
 
     async def remove_by_prefix(self, prefix):
         self.removed.append(prefix)
+        if self.fail_removals:
+            raise RuntimeError("transient backend failure")
         victims = [name for name in self.live if name.startswith(prefix)]
         for name in victims:
             self.live.pop(name).removed = True
@@ -333,6 +336,27 @@ async def test_crashed_instance_is_reaped_and_unknown_sandboxes_are_left_alone(t
     live.lease.write()
     _age_lease(live, seconds=5)
     assert await successor.reap_orphans() == 0
+
+
+async def test_ownership_record_survives_a_failed_cleanup_and_the_retry_reaps(tmp_path):
+    """A transient listing or deletion failure must not drop the dead instance's lease: the
+    lease is what lets a later start find its sandboxes."""
+    backend = FakeBackend()
+    state = str(tmp_path / "state")
+    crashed, _, _ = make_driver(tmp_path, backend=backend, state_dir=state)
+    crashed.lease.write()
+    dead_box = await crashed.create_sandbox(sample(tmp_path))
+    _age_lease(crashed, seconds=5000)
+    successor, _, _ = make_driver(tmp_path, backend=backend, state_dir=state)
+    successor.lease.write()
+    backend.fail_removals = True
+    assert await successor.reap_orphans() == 0
+    assert crashed.lease.path().exists()                                 # record kept
+    assert crashed.sandbox_name(dead_box.episode_id) in backend.live     # still running, still known
+    backend.fail_removals = False
+    assert await successor.reap_orphans() == 1                           # the retry finds it
+    assert not crashed.lease.path().exists()
+    assert crashed.sandbox_name(dead_box.episode_id) not in backend.live
 
 
 async def test_without_a_state_dir_nothing_is_reaped(tmp_path):

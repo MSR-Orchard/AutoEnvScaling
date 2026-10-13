@@ -477,22 +477,26 @@ async def test_batch_fills_by_oversampling_filters_constant_groups_and_carries_t
     assert peak[0] <= cfg.max_concurrent_episodes                     # the episode budget bounds admission
     assert gate.calls == ["park", "quiesce"]                           # the cut: gate closed, quiescence confirmed
     assert result.metrics["carry/trainable_groups"] == 3 and result.metrics["carry/weight_version"] == 0
-    # the slow group parked with its sandboxes; surplus completed groups are carried too
-    parked = [g for g in result.aborted if g[0].group_index == 5]
-    assert len(parked) == 1 and all(s.status == "aborted" for s in parked[0])
-    assert all(s.metadata["start_rollout_id"] == 10 for s in parked[0])
-    assert registry.episode_ids() == ["group-5-r10", "group-5-r11"]
-    surplus = [g for g in result.aborted if g[0].group_index != 5]
-    assert all(s.status == "completed" for g in surplus for s in g)
-    assert source.buffer == result.aborted
-    # every dropped or trained group released its sandbox; only the parked ones remain
-    assert sum(sb.closed for sb in driver.sandboxes.values()) == driver.created - 2
+    # The slow group parked with its sandboxes. Any other group still running at the cut is a
+    # valid surplus that parks too, and completed surplus groups are carried as they are.
+    def parked_members(groups):
+        return sorted(ep.episode_id(s) for g in groups for s in g if s.status == "aborted")
 
-    # Next rollout: the buffer is claimed first, the parked group resumes under version 1 and
-    # keeps the tokens it sampled under version 0; carried completed groups are reused as they are.
+    slow = next(g for g in result.aborted if g[0].group_index == 5)
+    assert all(s.status == "aborted" for s in slow)
+    assert all(s.metadata["start_rollout_id"] == 10 for s in slow)
+    parked_ids = parked_members(result.aborted)
+    assert {"group-5-r10", "group-5-r11"} <= set(parked_ids)
+    assert registry.episode_ids() == parked_ids                 # exactly the parked episodes hold a sandbox
+    assert all(s.status in ("completed", "aborted") for g in result.aborted for s in g)
+    assert source.buffer == result.aborted
+    # every dropped, trained or completed episode released its sandbox; only parked ones remain
+    assert sum(sb.closed for sb in driver.sandboxes.values()) == driver.created - len(parked_ids)
+
+    # Next rollout: the buffer is claimed first, parked episodes resume under version 1 and keep
+    # the tokens they sampled under version 0; carried completed groups are reused as they are.
     driver.slow.clear()
-    before = {ep.episode_id(s): (list(s.tokens), list(s.rollout_log_probs)) for s in parked[0]}
-    created = driver.created
+    before = {ep.episode_id(s): (list(s.tokens), list(s.rollout_log_probs)) for s in slow}
     cfg2 = ro.LoopConfig(rollout_batch_size=len(source.buffer) + 1, n_samples_per_prompt=N,
                          over_sampling_batch_size=2, max_concurrent_episodes=6, abort_drain_timeout_s=2,
                          wait_timeout_s=0.01)
@@ -505,10 +509,11 @@ async def test_batch_fills_by_oversampling_filters_constant_groups_and_carries_t
         assert s.tokens[:len(toks)] == toks and s.rollout_log_probs[:len(lps)] == lps
         assert len(s.rollout_log_probs) > len(lps) and s.metadata["resumes"] == 1
         assert s.metadata["admission_version"] == 0
-    assert result2.metrics["carry/resumed_trainable_samples"] == 2
+    assert result2.metrics["carry/resumed_trainable_samples"] >= 2
     assert result2.metrics["carry/max_staleness"] == 1
-    assert driver.created == created + 2 * 1 + 0 or driver.created >= created   # one fresh group at most
-    assert len(registry) == 0
+    # whatever was still running at this cut parked again; nothing else holds a sandbox
+    assert registry.episode_ids() == parked_members(result2.aborted)
+    registry.drain()
     registry.assert_no_leaks()
 
 

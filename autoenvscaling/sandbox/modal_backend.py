@@ -221,19 +221,30 @@ class ModalBackend:
 
     async def remove_by_prefix(self, prefix: str) -> int:
         """Terminate this app's sandboxes whose name starts with ``prefix`` (orphans of a previous
-        process). Relies on ``modal.Sandbox.list`` and the ``aes.name`` tag set at creation; a
-        listing failure is logged and counts as zero, never as an error."""
+        process). Relies on ``modal.Sandbox.list`` and the ``aes.name`` tag set at creation.
+
+        Raises if the listing fails or any matching sandbox could not be terminated (after
+        trying them all), so the caller keeps its ownership record and retries later; a
+        swallowed failure here would leave a billable sandbox running with nothing left to
+        point at it.
+        """
         modal = self._sdk()
         app = await self._get_app()
         removed = 0
-        try:
-            async for sb in modal.Sandbox.list.aio(app_id=getattr(app, "app_id", None)):
-                tags = await sb.get_tags.aio()
-                if str((tags or {}).get("aes.name", "")).startswith(prefix):
-                    await sb.terminate.aio()
-                    removed += 1
-        except Exception as exc:  # noqa: BLE001 - best effort
-            logger.warning("could not list Modal sandboxes to remove orphans: %s", exc)
+        failures: list[str] = []
+        async for sb in modal.Sandbox.list.aio(app_id=getattr(app, "app_id", None)):
+            tags = await sb.get_tags.aio()
+            name = str((tags or {}).get("aes.name", ""))
+            if not name.startswith(prefix):
+                continue
+            try:
+                await sb.terminate.aio()
+                removed += 1
+            except Exception as exc:  # noqa: BLE001 - finish the sweep, then report
+                failures.append(f"{name}: {exc}")
+        if failures:
+            raise RuntimeError(f"could not terminate {len(failures)} Modal sandbox(es) with prefix "
+                               f"{prefix!r} ({removed} removed): " + "; ".join(failures))
         return removed
 
     async def create(self, spec: SandboxSpec) -> ModalSandbox:

@@ -183,6 +183,26 @@ async def test_remove_by_prefix_terminates_only_tagged_sandboxes_of_that_prefix(
     assert await backend.remove_by_prefix("run-a-inst1-") == 1
     assert [sb.terminated for sb in listed] == [True, False, False]
 
+    # A listing failure or a failed termination raises, so the caller keeps its ownership
+    # record and retries instead of forgetting a sandbox that is still running.
+    async def broken_listing(app_id=None, **kwargs):
+        raise RuntimeError("modal unavailable")
+        yield  # pragma: no cover - makes this an async generator
+
+    fake.Sandbox.list = Op(broken_listing)
+    with pytest.raises(RuntimeError, match="modal unavailable"):
+        await backend.remove_by_prefix("run-a-")
+    fake.Sandbox.list = Op(listing)
+
+    async def refuse():
+        raise RuntimeError("terminate failed")
+
+    listed[1].terminate = Op(refuse)
+    listed[2].name = "run-a-inst3-ep3"
+    with pytest.raises(RuntimeError, match="could not terminate 1"):
+        await backend.remove_by_prefix("run-a-")
+    assert listed[2].terminated                                          # the sweep still finished
+
 
 def test_blocked_hosts_script_is_idempotent_and_validated(tmp_path):
     hosts = tmp_path / "hosts"

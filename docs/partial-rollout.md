@@ -225,7 +225,8 @@ admission of a sandbox never blocks a worker thread.
   mean) are quoted there from monitoring, not re-measured here.
 * **Modal orphan removal** uses `modal.Sandbox.list` and sandbox tags; the Modal SDK is not
   installed on the machine this was written on, so that call path is covered only by the test
-  fakes. A listing failure is logged and leaves the orphans in place.
+  fakes. A listing or termination failure raises, and the dead instance's lease is kept, so the
+  next start retries rather than forgetting a sandbox that may still be running.
 
 ## 6. 16 x 16 (paper) versus 8 x 32 (older carry launcher)
 

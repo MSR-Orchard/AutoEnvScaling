@@ -472,9 +472,16 @@ class SandboxEpisodeDriver:
                 logger.info("[pi] instance %s of this run is alive (heartbeat %.0fs ago); leaving "
                             "its sandboxes", lease["instance_id"], age)
                 continue
-            n = int(await reaper(f"{self.settings.run_id}-{lease['instance_id']}-"))
+            try:
+                n = int(await reaper(f"{self.settings.run_id}-{lease['instance_id']}-"))
+            except Exception as exc:  # noqa: BLE001 - keep the record; the next start retries
+                logger.warning("[pi] could not remove the sandboxes of dead instance %s (%s); "
+                               "keeping its lease so a later start retries", lease["instance_id"], exc)
+                continue
             logger.warning("[pi] reaped %d sandboxes of dead instance %s (heartbeat %.0fs ago)",
                            n, lease["instance_id"], age)
+            # Only a sweep that completed proves nothing of this instance is left running; the
+            # ownership record is what lets a later process find those sandboxes at all.
             self.lease.remove(lease["instance_id"])
             removed += n
         return removed
