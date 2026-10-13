@@ -145,6 +145,65 @@ def test_domain_allowlist_is_passed_through(fake):
     assert kwargs["outbound_domain_allowlist"] == ["pypi.org"]
 
 
+def test_spec_domain_allowlist_overrides_the_backend_default(fake):
+    backend = ModalBackend(modal_module=fake, domain_allowlist=["pypi.org"])
+    kwargs = backend.create_kwargs(SandboxSpec(image="img", domain_allowlist=["proxy.example"]), app="app")
+    assert kwargs["outbound_domain_allowlist"] == ["proxy.example"]
+    kwargs = ModalBackend(modal_module=fake).create_kwargs(SandboxSpec(image="img", domain_allowlist=["a.b"]),
+                                                            app="app")
+    assert kwargs["outbound_domain_allowlist"] == ["a.b"]
+
+
+async def test_remove_by_prefix_terminates_only_tagged_sandboxes_of_that_prefix(fake):
+    class Op:
+        def __init__(self, fn):
+            self.aio = fn
+
+    class ListedSandbox:
+        def __init__(self, name):
+            self.name = name
+            self.terminated = False
+            self.get_tags = Op(self._tags)
+            self.terminate = Op(self._terminate)
+
+        async def _tags(self):
+            return {"aes.name": self.name}
+
+        async def _terminate(self):
+            self.terminated = True
+
+    listed = [ListedSandbox("run-a-inst1-ep1"), ListedSandbox("run-a-inst2-ep2"), ListedSandbox("run-b-inst1-ep3")]
+
+    async def listing(app_id=None, **kwargs):
+        for sb in listed:
+            yield sb
+
+    fake.Sandbox.list = Op(listing)
+    backend = ModalBackend(modal_module=fake)
+    assert await backend.remove_by_prefix("run-a-inst1-") == 1
+    assert [sb.terminated for sb in listed] == [True, False, False]
+
+    # A listing failure or a failed termination raises, so the caller keeps its ownership
+    # record and retries instead of forgetting a sandbox that is still running.
+    async def broken_listing(app_id=None, **kwargs):
+        raise RuntimeError("modal unavailable")
+        yield  # pragma: no cover - makes this an async generator
+
+    fake.Sandbox.list = Op(broken_listing)
+    with pytest.raises(RuntimeError, match="modal unavailable"):
+        await backend.remove_by_prefix("run-a-")
+    fake.Sandbox.list = Op(listing)
+
+    async def refuse():
+        raise RuntimeError("terminate failed")
+
+    listed[1].terminate = Op(refuse)
+    listed[2].name = "run-a-inst3-ep3"
+    with pytest.raises(RuntimeError, match="could not terminate 1"):
+        await backend.remove_by_prefix("run-a-")
+    assert listed[2].terminated                                          # the sweep still finished
+
+
 def test_blocked_hosts_script_is_idempotent_and_validated(tmp_path):
     hosts = tmp_path / "hosts"
     hosts.write_text("")

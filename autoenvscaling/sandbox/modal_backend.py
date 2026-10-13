@@ -214,15 +214,46 @@ class ModalBackend:
             kwargs["name"] = spec.name
         if self._environment_name:
             kwargs["environment_name"] = self._environment_name
-        if self._domain_allowlist:
-            kwargs["outbound_domain_allowlist"] = list(self._domain_allowlist)
+        allowlist = spec.domain_allowlist if spec.domain_allowlist is not None else self._domain_allowlist
+        if allowlist:
+            kwargs["outbound_domain_allowlist"] = list(allowlist)
         return kwargs
+
+    async def remove_by_prefix(self, prefix: str) -> int:
+        """Terminate this app's sandboxes whose name starts with ``prefix`` (orphans of a previous
+        process). Relies on ``modal.Sandbox.list`` and the ``aes.name`` tag set at creation.
+
+        Raises if the listing fails or any matching sandbox could not be terminated (after
+        trying them all), so the caller keeps its ownership record and retries later; a
+        swallowed failure here would leave a billable sandbox running with nothing left to
+        point at it.
+        """
+        modal = self._sdk()
+        app = await self._get_app()
+        removed = 0
+        failures: list[str] = []
+        async for sb in modal.Sandbox.list.aio(app_id=getattr(app, "app_id", None)):
+            tags = await sb.get_tags.aio()
+            name = str((tags or {}).get("aes.name", ""))
+            if not name.startswith(prefix):
+                continue
+            try:
+                await sb.terminate.aio()
+                removed += 1
+            except Exception as exc:  # noqa: BLE001 - finish the sweep, then report
+                failures.append(f"{name}: {exc}")
+        if failures:
+            raise RuntimeError(f"could not terminate {len(failures)} Modal sandbox(es) with prefix "
+                               f"{prefix!r} ({removed} removed): " + "; ".join(failures))
+        return removed
 
     async def create(self, spec: SandboxSpec) -> ModalSandbox:
         modal = self._sdk()
         app = await self._get_app()
         sandbox = ModalSandbox(await modal.Sandbox.create.aio(**self.create_kwargs(spec, app)), spec)
         try:
+            if spec.name and hasattr(sandbox._sb, "set_tags"):
+                await sandbox._sb.set_tags.aio({"aes.name": spec.name})
             await sandbox._check(f"mkdir -p {shlex.quote(spec.workdir)}", "create workdir")
             if spec.blocked_hosts:
                 logger.warning(

@@ -6,16 +6,21 @@
     DPPO total-variation threshold 0.1
     KL / entropy coefficients      0 / 0
 
-`train_args()` renders the arguments for Miles' `train.py`. Three modes decide where the
+`train_args()` renders the arguments for Miles' `train.py`. Four modes decide where the
 rollouts come from:
 
 * `bridge` (default): the self-play loop in this package runs every solver and proposer episode
   and hands Miles finished RL groups through `training.miles.bridge`. Miles only trains and
   serves the current weights. Used for shared-policy training, frontier-proposer runs and
-  static pools alike.
-* `generate_fn`: Miles samples prompts from `prompt_data` (see `Pool.export_prompt_data`) and
-  calls an external per-episode generate function (`--custom-generate-function-path`) that runs
-  the solver in a sandbox. This package does not ship such a function; see the README.
+  static pools alike. Every episode of a batch finishes before the update.
+* `carry`: the paper's solver-training loop (`training.carry`). Miles samples environments from
+  `prompt_data` (see `Pool.export_prompt_data`), runs Pi in a sandbox per episode through the
+  recording proxy, over-samples environments against an episode budget, discards groups whose
+  rewards do not vary until `rollout_batch_size` groups remain, and carries unfinished episodes
+  across the weight update with their sampled token ids and log-probabilities
+  (`--partial-rollout --use-rollout-logprobs`).
+* `generate_fn`: Miles samples prompts from `prompt_data` and calls an external per-episode
+  generate function (`--custom-generate-function-path`) that returns a finished sample.
 * `sft`: supervised fine-tuning on `to_sft` rows, used for the Cold-Start checkpoint.
 
 Paths are never defaulted: model, data and output locations come from the caller.
@@ -27,11 +32,14 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 BRIDGE = "bridge"
+CARRY = "carry"
 GENERATE_FN = "generate_fn"
 SFT = "sft"
-MODES = (BRIDGE, GENERATE_FN, SFT)
+MODES = (BRIDGE, CARRY, GENERATE_FN, SFT)
 
 BRIDGE_ROLLOUT_FN = "autoenvscaling.training.miles.rollout.generate_rollout"
+CARRY_ROLLOUT_FN = "autoenvscaling.training.carry.rollout.generate_rollout"
+CARRY_LOG_FN = "autoenvscaling.training.carry.rollout.log_rollout_data"
 REWARD_HOOK = "autoenvscaling.training.miles.hooks.center_rewards_by_group"
 NONZERO_STD_FILTER = "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
 SFT_ROLLOUT_FN = "miles.rollout.sft_rollout.generate_rollout"
@@ -49,9 +57,11 @@ class MilesConfig:
 
     # ---- where rollouts come from ------------------------------------------------------------
     mode: str = BRIDGE
-    prompt_data: str | None = None                # generate_fn and sft modes
+    prompt_data: str | None = None                # carry, generate_fn and sft modes
     generate_function_path: str | None = None     # generate_fn mode
-    over_sampling_batch_size: int = 24            # generate_fn mode: prompts drawn per batch
+    over_sampling_batch_size: int = 40            # carry/generate_fn: environments drawn per refill
+    partial_rollout: bool = True                  # carry mode: park and resume unfinished episodes
+    max_weight_staleness: int = 4                 # carry mode: updates a parked episode may span
 
     # ---- batch and schedule --------------------------------------------------------------------
     rollout_batch_size: int = 16      # environments per solver batch
@@ -131,10 +141,14 @@ class MilesConfig:
                 out.append(f"{name} is required")
         if self.mode != SFT and not self.ref_load:
             out.append("ref_load (the torch_dist checkpoint) is required for RL")
-        if self.mode in (GENERATE_FN, SFT) and not self.prompt_data:
+        if self.mode in (CARRY, GENERATE_FN, SFT) and not self.prompt_data:
             out.append(f"{self.mode} mode needs prompt_data")
         if self.mode == GENERATE_FN and not self.generate_function_path:
             out.append("generate_fn mode needs generate_function_path")
+        if self.mode in (CARRY, GENERATE_FN) and self.over_sampling_batch_size < self.rollout_batch_size:
+            out.append("over_sampling_batch_size must be >= rollout_batch_size (Miles asserts it)")
+        if self.mode == CARRY and self.max_weight_staleness < 0:
+            out.append("max_weight_staleness must be >= 0")
         world = self.num_nodes * self.gpus_per_node
         model_parallel = self.tensor_parallel * self.context_parallel * self.pipeline_parallel
         if world % model_parallel:
@@ -212,6 +226,21 @@ class MilesConfig:
             # has proposer_group_size samples per group), so each one trains as a single step.
             a += ["--rollout-function-path", BRIDGE_ROLLOUT_FN, "--disable-rollout-global-dataset",
                   "--use-dynamic-global-batch-size", "--loss-mask-type", self.loss_mask_type]
+        elif self.mode == CARRY:
+            # The final run's rollout arguments: prompts from the pool file, over-sampling with
+            # the zero-variance filter, partial rollout with the engine's log-probabilities as the
+            # behaviour policy, and a shuffled pool so a hard stretch does not starve the filter.
+            a += ["--prompt-data", str(self.prompt_data), "--input-key", "prompt",
+                  "--label-key", "label", "--metadata-key", "metadata", "--apply-chat-template",
+                  "--rollout-shuffle",
+                  "--rollout-function-path", CARRY_ROLLOUT_FN,
+                  "--custom-rollout-log-function-path", CARRY_LOG_FN,
+                  "--over-sampling-batch-size", str(self.over_sampling_batch_size),
+                  "--dynamic-sampling-filter-path", NONZERO_STD_FILTER,
+                  "--use-rollout-logprobs",
+                  "--max-weight-staleness", str(self.max_weight_staleness)]
+            if self.partial_rollout:
+                a += ["--partial-rollout"]
         else:
             a += ["--prompt-data", str(self.prompt_data), "--input-key", "prompt",
                   "--label-key", "label", "--metadata-key", "metadata", "--apply-chat-template",
@@ -289,6 +318,15 @@ def exp2_qwen35_35b(**paths: Any) -> MilesConfig:
     return exp2_solver("qwen3.5-35b-a3b", **paths)
 
 
+def carry_solver(**paths: Any) -> MilesConfig:
+    """Solver RL with partial rollout and over-sampling, as the paper's final Qwen3.6-35B-A3B run
+    (16 environments x 16 attempts per update, 40 environments drawn per refill, up to 4 updates
+    of carry, 200 updates, 96k context, 16k per model call). `prompt_data` is a pool export."""
+    return MilesConfig(mode=CARRY, over_sampling_batch_size=40, partial_rollout=True,
+                       max_weight_staleness=4, num_rollout=200, rollout_max_context_len=98304,
+                       **paths)
+
+
 def cold_start_sft(**paths: Any) -> MilesConfig:
     """Cold-Start: fine-tune Qwen3.6-35B-A3B on the proposer trajectories from `to_sft`.
 
@@ -303,6 +341,7 @@ def cold_start_sft(**paths: Any) -> MilesConfig:
 
 
 PRESETS = {"shared-policy": shared_policy,
+           "carry-solver": carry_solver,
            "exp2-qwen3.5-9b": exp2_qwen35_9b,
            "exp2-qwen3.5-35b-a3b": exp2_qwen35_35b,
            "cold-start": cold_start_sft}

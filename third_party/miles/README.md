@@ -43,7 +43,7 @@ Miles container (or `launch/apptainer.sh` when `MILES_IMAGE` is set). Set `MILES
 `MEGATRON_DIR` to the checkouts inside the container. `ref_load` is the starting checkpoint in
 Megatron format, produced with Miles' `tools/convert_hf_to_torch_dist.py`.
 
-Three modes:
+Four modes:
 
 - **bridge** (default). The self-play loop (`python -m autoenvscaling.selfplay run`) runs every
   solver attempt, pool review and proposer episode against the Miles router, groups and scores
@@ -53,6 +53,14 @@ Three modes:
   loop's `schedule` subcommand prints the `--num-rollout` to use. Sandboxes must be able to reach
   the router: pass `--public-base-url` to the loop when they run elsewhere (for example on
   Modal) and the router is exposed through a tunnel.
+- **carry**. The paper's solver-training loop (`autoenvscaling/training/carry/`,
+  `--preset carry-solver`). Miles samples environments from a pool export, runs Pi in a sandbox
+  per episode through the recording proxy (`python -m autoenvscaling.training.carry proxy`),
+  over-samples environments against an episode budget, discards groups whose rewards do not
+  vary until the batch holds `rollout_batch_size` groups, and parks unfinished episodes across
+  the weight update with the engine's sampled token ids and log-probabilities
+  (`--partial-rollout --use-rollout-logprobs --max-weight-staleness 4`). `docs/partial-rollout.md`
+  records what was verified from the final run and what is new.
 - **generate_fn**. Miles samples prompts from a pool file (`Pool.export_prompt_data`) and calls
   a per-episode `--custom-generate-function-path` that runs the solver in a sandbox and returns
   a `Sample` with tokens and log-probabilities. AutoEnvScaling does not ship such a function.
@@ -61,12 +69,13 @@ Three modes:
 
 ## Known limitations
 
-- Bridge mode trains on re-tokenized conversations. Any difference between the re-rendered
-  chat template and the tokens the engine actually produced (for example reasoning text the
-  template drops from earlier turns) is trained on as if it had been sampled. Exact token
-  capture needs a proxy between the agent harness and the router that records token ids.
-- Unfinished trajectories are not carried across updates: every episode in a batch finishes (or
-  fails) before the update, so the step waits for its slowest episode.
+- Bridge mode trains on re-tokenized conversations and waits for every episode of a batch: any
+  difference between the re-rendered chat template and the tokens the engine actually produced
+  is trained on as if it had been sampled, and the step waits for its slowest episode. Carry
+  mode has neither limitation (the recording proxy keeps the engine's token ids and
+  log-probabilities; unfinished episodes are parked across the update), but in this release it
+  has been tested offline only, with fakes for Miles, the engines and the sandboxes
+  (`docs/partial-rollout.md`, section 5).
 - Evaluation does not run inside Miles in bridge mode; evaluate saved checkpoints separately.
 - Resuming: restart Miles with `--load` and the loop with the same `--run-dir`. Batches already
   written for rollout ids after the checkpoint are replayed, and the loop's counters can be

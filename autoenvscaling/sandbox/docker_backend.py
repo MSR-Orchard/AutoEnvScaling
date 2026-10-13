@@ -239,6 +239,17 @@ class DockerBackend:
         argv += [spec.image, str(int(spec.timeout_s))]
         return argv, client_env
 
+    async def remove_by_prefix(self, prefix: str) -> int:
+        """Remove every container whose name starts with ``prefix``: the sandboxes a previous
+        process of the same training run left behind. Returns how many were removed."""
+        result = await self._run([self._docker, "ps", "-aq", "--filter", f"name=^{prefix}"],
+                                 None, None, 120)
+        _check(result, "ps")
+        ids = result.stdout.decode().split()
+        if ids:
+            _check(await self._run([self._docker, "rm", "-f", *ids], None, None, 600), "rm")
+        return len(ids)
+
     async def create(self, spec: SandboxSpec) -> DockerSandbox:
         name = spec.name or f"aes-{uuid.uuid4().hex[:12]}"
         argv, client_env = self.run_argv(spec, name)

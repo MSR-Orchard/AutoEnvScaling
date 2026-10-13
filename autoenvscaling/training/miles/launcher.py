@@ -22,7 +22,10 @@ from pathlib import Path
 from typing import Any
 
 from autoenvscaling.training.miles.bridge import STOP_FILE
-from autoenvscaling.training.miles.config import BRIDGE, MilesConfig
+from autoenvscaling.training.miles.config import BRIDGE, CARRY, MilesConfig
+
+# Variables the carry's Ray workers read (training.carry.rollout.CarrySettings and the proxy key).
+CARRY_ENV_PREFIXES = ("AES_CARRY_", "AES_PROXY_API_KEY")
 
 LAUNCH_DIR = Path(__file__).resolve().parent / "launch"
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -87,8 +90,13 @@ class MilesLauncher:
                 raise ConfigError("bridge mode needs bridge_dir (the control directory the "
                                   "self-play loop also uses)")
             env["AES_BRIDGE_DIR"] = self.bridge_dir
-        if self.forward_env:
-            env["AES_FORWARD_ENV"] = " ".join(self.forward_env)
+        forward = list(self.forward_env)
+        if config.mode == CARRY:
+            # The carry settings travel as environment variables to the rollout workers.
+            forward += [name for name in sorted(self.base_env)
+                        if name.startswith(CARRY_ENV_PREFIXES) and name not in forward]
+        if forward:
+            env["AES_FORWARD_ENV"] = " ".join(forward)
         return env
 
     def problems(self, config: MilesConfig) -> list[str]:
@@ -99,6 +107,10 @@ class MilesLauncher:
             out.append("MEGATRON_DIR is not set")
         if config.mode == BRIDGE and not self.bridge_dir:
             out.append("bridge mode needs bridge_dir")
+        if config.mode == CARRY:
+            from autoenvscaling.training.carry.rollout import CarrySettings
+            out += [f"carry: {p}" for p in
+                    CarrySettings.from_env(self.base_env).problems(config.n_samples_per_prompt)]
         return out
 
     def plan(self, config: MilesConfig) -> str:
