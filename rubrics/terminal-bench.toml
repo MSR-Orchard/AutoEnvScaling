@@ -7,8 +7,12 @@
 # Terminal-Bench authors.
 #
 # Modification: the `binary_reward` criterion (the last criterion upstream) is removed, because
-# AutoEnvScaling tests give partial credit (reward = fraction of tests passed). Every other
-# criterion is copied unchanged. At run time the host also drops any criterion listed in
+# AutoEnvScaling tests give partial credit (reward = fraction of tests passed). In
+# `task_toml_schema`, the field lists add Harbor's `network_mode` and `allowed_hosts`
+# ([environment], [agent], [verifier]) and mark `allow_internet` as their deprecated alias: the
+# upstream list predates them, so a task using Harbor's current network field was failed as having
+# an invented field (Harbor 0.23, harbor.models.task.config). Every other criterion is copied
+# unchanged. At run time the host also drops any criterion listed in
 # ValidationSettings.rubric_skip, so the file can be swapped for the unmodified upstream copy.
 
 [[criteria]]
@@ -390,15 +394,19 @@ Valid sections and their fields (defined by the Harbor library):
 
 [verifier]:
 - timeout_sec, env, user, environment_mode
+- network_mode, allowed_hosts (network override while the verifier runs)
 - environment (subsection with the same fields as top-level [environment]; used in separate verifier mode to override resource limits)
 - collect (list of [[verifier.collect]] blocks, each running a command in a compose service after the agent phase to snapshot state for artifact collection; fields: command, service, timeout_sec, user)
 
 [agent]:
 - timeout_sec, user
+- network_mode, allowed_hosts (network override while the agent runs)
 
 [environment]:
 - build_timeout_sec, docker_image, cpus, memory_mb, storage_mb, gpus, gpu_types
-- allow_internet, env, skills_dir, mcp_servers
+- network_mode ("public", "no-network" or "allowlist"), allowed_hosts (with "allowlist")
+- allow_internet (deprecated alias of network_mode: true = "public", false = "no-network")
+- env, skills_dir, mcp_servers
 - healthcheck (subsection: command, interval_sec, timeout_sec, start_period_sec, start_interval_sec, retries)
 
 [solution]:
