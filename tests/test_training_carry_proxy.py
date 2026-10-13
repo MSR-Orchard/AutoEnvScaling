@@ -205,6 +205,11 @@ async def test_provisional_generation_rolls_back_when_the_agent_never_saw_it():
     with pytest.raises(px.ProxyError) as info:
         await proxy2.chat("e2", {"messages": [{"role": "user", "content": "a different task"}]})
     assert info.value.status == 409 and proxy2.episodes["e2"].error.startswith("render diverged")
+    # A render shorter than the committed recording (more than one generation lost) is refused:
+    # generating from it would record tokens in a context the engine never saw.
+    with pytest.raises(px.ProxyError) as info:
+        await proxy2.chat("e2", {"messages": msgs})
+    assert info.value.status == 409 and "shorter than the committed" in info.value.detail
 
 
 async def test_context_and_turn_limits_stop_the_agent_without_generating():
@@ -241,17 +246,27 @@ def test_app_endpoints_json_streaming_and_release(tmp_path):
     proxy, _engine, renderer = make_proxy(["hello", "CALL bash", "later"], api_key="secret",
                                          config_cache=str(tmp_path / "cfg.json"))
     client = TestClient(px.build_app(proxy))
-    assert client.get("/config").json()["carry_lifecycle_version"] == 1
+    headers = {"Authorization": "Bearer secret"}
+    # The whole surface needs the key, not just completions: the control endpoints can change
+    # the backend, open the gates and read or delete recordings. Only /healthz is open.
+    assert client.get("/healthz").json()["ok"] is True
+    for path in ("/config", "/park", "/episodes", "/episodes/e1", "/v1/models"):
+        assert client.get(path).status_code == 401, path
+    for path in ("/park", "/unpark", "/quiesce", "/config"):
+        assert client.post(path, json={}).status_code == 401, path
+    assert client.delete("/episodes/e1").status_code == 401
+    assert client.get("/config", headers=headers).json()["carry_lifecycle_version"] == 1
     assert client.post("/config", json={"sglang_url": "http://router:30001/", "served_id": "policy",
-                                        "max_turns": 7}).json()["sglang_url"] == "http://router:30001"
+                                        "max_turns": 7}, headers=headers).json()["sglang_url"] == "http://router:30001"
     assert json.loads((tmp_path / "cfg.json").read_text())["max_turns"] == 7
-    assert client.post("/config", json={"max_context": 0}).status_code == 400
-    assert client.get("/v1/models").json()["data"][0]["id"] == "policy"
+    assert client.post("/config", json={"max_context": 0}, headers=headers).status_code == 400
+    assert client.get("/v1/models", headers=headers).json()["data"][0]["id"] == "policy"
+    client.headers.update(headers)
 
     msgs = [{"role": "user", "content": "task"}]
     tools = [{"type": "function", "function": {"name": "bash"}}]      # Pi sends its tools every request
-    assert client.post("/v1/ep/e1/chat/completions", json={"messages": msgs, "tools": tools}).status_code == 401
-    headers = {"Authorization": "Bearer secret"}
+    assert client.post("/v1/ep/e1/chat/completions", json={"messages": msgs, "tools": tools},
+                       headers={"Authorization": "Bearer wrong"}).status_code == 401
     r = client.post("/v1/ep/e1/chat/completions", json={"messages": msgs, "tools": tools}, headers=headers)
     assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "hello"
     assert r.json()["usage"]["completion_tokens"] == len(renderer.encode("hello"))

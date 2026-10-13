@@ -25,11 +25,12 @@ class FakeSandbox:
         self.terminated = 0
         self.pi_done = asyncio.Event()
         self.pi_rc = 0
-        self.reward_text = "0.75"
+        self.reward_text = "0.75"          # what this run's test.sh writes; None writes nothing
+        self.verifier_files = {}           # /logs/verifier as the container sees it
 
     async def exec(self, *cmd, timeout_s=None, workdir=None, env=None):
         script = cmd[-1]
-        self.calls.append((cmd, timeout_s, env))
+        self.calls.append((cmd, timeout_s, env, workdir))
         if "command -v curl" in script:
             return ExecResult(0, "/usr/bin/curl")
         if "npm install" in script:
@@ -42,8 +43,15 @@ class FakeSandbox:
         if cmd[0] == "python3":
             return ExecResult(0, '{"agent_ended": true, "stop_reason": "stop", "assistant_error": false, '
                                  '"content_blocks": 1, "http_status": null}')
+        if script.startswith("rm -rf /tests /logs/verifier"):
+            self.verifier_files.clear()
+            return ExecResult(0)
         if "test.sh" in script:
-            return ExecResult(0, f"RC=0\n{self.reward_text}\n")
+            if self.reward_text is not None:
+                self.verifier_files["reward.txt"] = self.reward_text
+            if "reward.txt" in self.verifier_files:
+                return ExecResult(0, f"RC=0\nREWARD_TXT\n{self.verifier_files['reward.txt']}\n")
+            return ExecResult(0, "RC=1\nNO_REWARD\nno tests ran\n")
         if script == "true":
             return ExecResult(0)
         return ExecResult(1, "", f"unexpected: {script}")
@@ -111,9 +119,12 @@ def recording(n_prompt=4, n_gen=6, turns=2):
 
 
 def make_driver(tmp_path, rec=None, **overrides):
-    settings = CarrySettings(max_live_sandboxes=4, max_concurrent_episodes=2, carry_allowance=2,
-                             proxy_public_url="https://proxy.example", episode_timeout_s=60, run_id="run1",
-                             pi_version="0.80.6", **overrides)
+    values = {"max_live_sandboxes": 4, "max_concurrent_episodes": 2, "carry_allowance": 2,
+              "proxy_public_url": "https://proxy.example", "episode_timeout_s": 60, "run_id": "run1",
+              "pi_version": "0.80.6", "sandbox_backend": "fake", "sandbox_cpu": 2, "sandbox_memory_gib": 8,
+              "network": "allowlist"}
+    values.update(overrides)
+    settings = CarrySettings(**values)
     args = SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=30001, rollout_max_context_len=1000,
                            rollout_max_response_len=100, hf_checkpoint=None)
     backend = FakeBackend()
@@ -140,8 +151,11 @@ async def test_full_episode_installs_pi_runs_once_verifies_and_releases(tmp_path
     fake = backend.created[0]
     assert fake.spec.image == "ghcr.io/example/task:1" and fake.spec.name == f"run1-{sb.episode_id}"
     assert proxy.configured == [("http://10.0.0.1:30001", "policy", 128, 1000)]
-    assert any("npm install -g @mariozechner/pi-coding-agent@0.80.6" in c[0][-1] for c in fake.calls)
-    assert any(f"/v1/ep/{sb.episode_id}" in c[0][-1] for c in fake.calls)   # per-episode route planted
+    install = next(c[0][-1] for c in fake.calls if "npm install" in c[0][-1])
+    assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.6" in install   # Harbor's package
+    assert f"/v1/ep/{sb.episode_id}" in fake.files[f"{dr.PI_CONFIG_DIR}/models.json"].decode()   # per-episode route
+    assert fake.spec.cpu == 2 and fake.spec.memory_gib == 8 and fake.spec.workdir == "/app"
+    assert "proxy.example" in fake.spec.domain_allowlist and "registry.npmjs.org" in fake.spec.domain_allowlist
     assert driver.pending_cleanup_count() == 1
 
     run = asyncio.create_task(driver.run_turns(sample=s, sandbox=sb, turn_state=None, sampling_params={},
@@ -149,7 +163,8 @@ async def test_full_episode_installs_pi_runs_once_verifies_and_releases(tmp_path
     await asyncio.sleep(0.02)
     assert not run.done() and fake.files[f"/tmp/aes_pi_prompt_{sb.episode_id}.txt"] == b"fix the build"
     launch = next(c for c in fake.calls if "pi --print" in c[0][-1])
-    assert launch[2] == {"OPENAI_API_KEY": "proxy"} and "fix the build" not in launch[0][-1]
+    assert launch[2] == {"OPENAI_API_KEY": "proxy", "PI_CODING_AGENT_DIR": dr.PI_CONFIG_DIR}
+    assert "fix the build" not in launch[0][-1]
     fake.pi_done.set()
     outcome = await asyncio.wait_for(run, 2)
     assert outcome.status is TurnStatus.DONE and outcome.turn_index == 2
@@ -159,6 +174,9 @@ async def test_full_episode_installs_pi_runs_once_verifies_and_releases(tmp_path
 
     reward = await driver.verify(sample=s, sandbox=sb, turn_state=None)
     assert reward == 0.75 and fake.uploaded == [(tmp_path / "task" / "tests", "/tests")]
+    reset = next(i for i, c in enumerate(fake.calls) if c[0][-1].startswith("rm -rf /tests /logs/verifier"))
+    run = next(i for i, c in enumerate(fake.calls) if "test.sh" in c[0][-1])
+    assert reset < run and fake.calls[run][3] == "/app"                  # fresh dirs, task workdir
     await driver.wait_cleanup(2)
     assert fake.terminated == 1 and proxy.deleted == [sb.episode_id] and driver.pending_cleanup_count() == 0
     assert sum(1 for c in fake.calls if "pi --print" in c[0][-1]) == 1
@@ -243,6 +261,36 @@ async def test_reap_orphans_and_setup_failure_release_the_slot(tmp_path):
     assert driver._live._value == 4                                     # the admission slot came back
 
 
+async def test_stale_or_missing_reward_file_never_scores(tmp_path):
+    driver, backend, _proxy = make_driver(tmp_path)
+    s = sample(tmp_path)
+    sb = await driver.create_sandbox(s)
+    fake = backend.created[0]
+    fake.verifier_files["reward.txt"] = "1"        # planted by the agent or left by an earlier run
+    fake.reward_text = None                         # this run's tests write nothing
+    with pytest.raises(RuntimeError, match="no reward"):
+        await driver.verify(sample=s, sandbox=sb, turn_state=None)
+    await driver.wait_cleanup(2)
+    assert fake.terminated == 1                     # the sandbox is still released
+
+
+async def test_network_and_pi_package_settings(tmp_path):
+    (tmp_path / "task").mkdir()
+    (tmp_path / "task" / "task.toml").write_text('[environment]\nnetwork_mode = "allowlist"\n'
+                                                 'allowed_hosts = ["pypi.org"]\n[agent]\nuser = "solver"\n')
+    driver, backend, _proxy = make_driver(tmp_path)
+    sb = await driver.create_sandbox(sample(tmp_path))
+    assert "pypi.org" in backend.created[-1].spec.domain_allowlist
+    sb.close()
+    driver_public, backend_public, _ = make_driver(tmp_path, network="public")
+    await driver_public.create_sandbox(sample(tmp_path, with_tests=False))
+    assert backend_public.created[-1].spec.domain_allowlist is None
+    assert dr.pi_package_spec("0.80.6") == "@earendil-works/pi-coding-agent@0.80.6"
+    assert dr.pi_package_spec("0.73.1") == "@mariozechner/pi-coding-agent@0.73.1"
+    assert dr.pi_package_spec("0.80.6", "my/pi") == "my/pi@0.80.6"
+    assert dr.task_allowed_hosts(str(tmp_path / "missing")) == []
+
+
 def test_apply_recording_and_reward_parsing():
     s = SimpleNamespace(tokens=[], rollout_log_probs=None, loss_mask=None, response_length=0, weight_versions=[])
     dr.apply_recording(s, recording(), max_context=100)
@@ -255,10 +303,12 @@ def test_apply_recording_and_reward_parsing():
         dr.apply_recording(s, bad)
     with pytest.raises(RuntimeError, match="prompt_len"):
         dr.apply_recording(s, {**recording(), "prompt_len": 0})
-    assert dr.parse_reward_output("RC=0\n0.5\n") == 0.5
-    assert dr.parse_reward_output("RC=1\n{\"reward\": 0.25}\n") == 0.25
-    assert dr.parse_reward_output("RC=1\n{\"t1\": 1, \"t2\": 0}\n") == 0.5
+    assert dr.parse_reward_output("RC=0\nREWARD_TXT\n0.5\n") == 0.5
+    assert dr.parse_reward_output("RC=1\nREWARD_JSON\n{\"reward\": 0.25}\n") == 0.25
+    assert dr.parse_reward_output("RC=1\nREWARD_JSON\n{\"t1\": 1, \"t2\": 0}\n") == 0.5
     with pytest.raises(RuntimeError, match="no reward"):
-        dr.parse_reward_output("RC=1\n")
+        dr.parse_reward_output("RC=1\nNO_REWARD\nImportError: pytest\n")
+    with pytest.raises(RuntimeError, match="no reward marker"):
+        dr.parse_reward_output("RC=0\n1\n")                    # a bare number is not this run's file
     with pytest.raises(RuntimeError):
-        dr.parse_reward_output("RC=0\nnan\n")
+        dr.parse_reward_output("RC=0\nREWARD_TXT\nnan\n")

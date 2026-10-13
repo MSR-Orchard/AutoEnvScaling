@@ -79,16 +79,23 @@ class CarrySettings:
     verify_timeout_s: float = 900.0
     max_turns: int = 128
     abort_drain_timeout_s: float = 300.0    # bound on waiting for in-flight tasks at the cut
+    abort_request_timeout_s: float = 60.0   # bound on the engines acknowledging abort_request
     heartbeat_s: float = 300.0              # parked-sandbox keepalive sweep
     proxy_url: str = "http://127.0.0.1:30000"        # the recording proxy, from the trainer
     proxy_public_url: str = ""                       # the same proxy, from inside sandboxes
     proxy_api_key_env: str = "AES_PROXY_API_KEY"
     served_model: str = "policy"
-    sandbox_backend: str = "docker"                  # autoenvscaling.sandbox backend
-    sandbox_cpu: int = 2
-    sandbox_memory_gib: int = 8
+    # Sandboxes follow the repository's own solver settings unless overridden here:
+    # `Settings.sandbox.backend` (Modal by default), `solver_cpu`, `solver_memory_gib`, and the
+    # solver network mode (`AES_SOLVER_NETWORK`, allowlist by default).
+    sandbox_backend: str = ""                        # "" -> Settings.sandbox.backend
+    sandbox_cpu: int = 0                             # 0 -> Settings.sandbox.solver_cpu
+    sandbox_memory_gib: int = 0                      # 0 -> Settings.sandbox.solver_memory_gib
+    sandbox_workdir: str = "/app"                    # the Terminal-Bench task convention
+    network: str = ""                                # "" -> AES_SOLVER_NETWORK ("allowlist" | "public")
     run_id: str = "aes-carry"                        # names sandboxes so orphans can be reaped
     pi_version: str = ""                             # default: calibration.solver.PI_VERSION
+    pi_package: str = ""                             # default: the scope Harbor uses for that version
     state_dir: str = ""                              # where per-rollout carry manifests go
 
     @classmethod
@@ -100,7 +107,14 @@ class CarrySettings:
             if raw is None:
                 continue
             values[f.name] = _coerce(f.default, raw)
-        return cls(**values)
+        settings = cls(**values)
+        from autoenvscaling.config import Settings
+        repo = Settings.load(env=env).sandbox
+        settings.sandbox_backend = settings.sandbox_backend or repo.backend
+        settings.sandbox_cpu = settings.sandbox_cpu or repo.solver_cpu
+        settings.sandbox_memory_gib = settings.sandbox_memory_gib or repo.solver_memory_gib
+        settings.network = settings.network or env.get("AES_SOLVER_NETWORK", "allowlist").strip().lower()
+        return settings
 
     def to_env(self) -> dict[str, str]:
         return {ENV_PREFIX + f.name.upper(): str(getattr(self, f.name)) for f in fields(self)}
@@ -115,6 +129,10 @@ class CarrySettings:
             out.append("episode_timeout_s must be positive")
         if not self.proxy_public_url:
             out.append("proxy_public_url is required (sandboxes cannot reach the trainer's loopback)")
+        if self.network not in ("", "allowlist", "public"):
+            out.append("network must be 'allowlist' or 'public'")
+        if self.sandbox_backend not in ("", "modal", "docker"):
+            out.append("sandbox_backend must be 'modal' or 'docker'")
         return out
 
 
@@ -137,6 +155,7 @@ class LoopConfig:
     max_concurrent_episodes: int
     partial_rollout: bool = True
     abort_drain_timeout_s: float = 300.0
+    abort_request_timeout_s: float = 60.0
     wait_timeout_s: float = 1.0          # how often admission is re-evaluated while waiting
     admit_log_interval_s: float = 60.0
 
@@ -316,7 +335,13 @@ async def cut(cfg: LoopConfig, *, state: RolloutState, hooks: CarryHooks,
     assert not state.aborted
     state.aborted = True
     await hooks.before_cut()
-    await hooks.engines_abort()
+    try:
+        # The first abort_request must be bounded too: a router that never answers would
+        # otherwise hold the cut forever. Quiescence is still confirmed (or refused) below.
+        await asyncio.wait_for(hooks.engines_abort(), timeout=cfg.abort_request_timeout_s)
+    except TimeoutError:
+        logger.warning("the engines did not acknowledge abort_request within %.0fs; continuing",
+                       cfg.abort_request_timeout_s)
     await hooks.after_abort()
 
     aborted: list = []
@@ -393,7 +418,7 @@ def _runtime(args: Any) -> dict[str, Any]:
                           episode_timeout_s=settings.episode_timeout_s,
                           max_context_len=int(getattr(args, "rollout_max_context_len", 0) or 0))
     driver = SandboxEpisodeDriver(settings, args)
-    gate = HttpGate(settings.proxy_url)
+    gate = HttpGate(settings.proxy_url, api_key=os.environ.get(settings.proxy_api_key_env, ""))
     _RUNTIME.update(settings=settings, rules=rules, driver=driver, gate=gate,
                     registry=ep.get_registry(),
                     heartbeat=Heartbeat(ep.get_registry(), settings.heartbeat_s,
@@ -536,7 +561,8 @@ def generate_rollout(args: Any, rollout_id: int, data_source: Any, evaluation: b
                      over_sampling_batch_size=args.over_sampling_batch_size,
                      max_concurrent_episodes=settings.max_concurrent_episodes,
                      partial_rollout=bool(args.partial_rollout),
-                     abort_drain_timeout_s=settings.abort_drain_timeout_s)
+                     abort_drain_timeout_s=settings.abort_drain_timeout_s,
+                     abort_request_timeout_s=settings.abort_request_timeout_s)
     output, aborted = run(_generate(args, rollout_id, data_source, cfg, rt, dynamic_filter,
                                     sampling_params))
     data_source.add_samples(aborted)

@@ -34,6 +34,7 @@ import re
 import shlex
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -41,6 +42,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from autoenvscaling.sandbox.base import (
     ExecResult,
@@ -57,17 +59,25 @@ from autoenvscaling.training.carry.episode import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PI_PACKAGE = "@mariozechner/pi-coding-agent"
-SESSION_DIR = "$HOME/.pi-sessions"
+# The package Harbor's own Pi agent and docker/proposer install. The old scope stopped at
+# 0.73.1 and is deprecated on npm; the paper's 0.80.6 exists only under the new one.
+CURRENT_PI_PACKAGE = "@earendil-works/pi-coding-agent"
+LEGACY_PI_PACKAGE = "@mariozechner/pi-coding-agent"
+PI_PACKAGE_RENAME_VERSION = (0, 74, 0)
+PI_CONFIG_DIR = "/tmp/aes-pi-agent"            # PI_CODING_AGENT_DIR, as Harbor's agent sets it
+SESSION_DIR = f"{PI_CONFIG_DIR}/sessions"
 PI_OUTPUT = "/tmp/pi_out.json"
 ABORT_POLL_S = float(os.environ.get("AES_CARRY_ABORT_POLL_S", "5"))
 INSTALL_CONCURRENCY = int(os.environ.get("AES_CARRY_INSTALL_CONCURRENCY", "64"))
 INSTALL_RETRIES = 3
 
+# Harbor's Node install (nvm, Node 22) followed by Harbor's Pi install flags.
 _PI_BOOTSTRAP = (
-    "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash >/dev/null 2>&1 && "
-    ". ~/.nvm/nvm.sh && nvm install 22 >/dev/null 2>&1 && "
-    "npm install -g {package} >/dev/null 2>&1 && pi --version"
+    "set -euo pipefail; "
+    "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | env -u NODE_VERSION bash >/dev/null 2>&1 && "
+    'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && '
+    "nvm install 22 >/dev/null 2>&1 && nvm alias default 22 >/dev/null 2>&1 && "
+    "npm install -g --ignore-scripts {package} >/dev/null 2>&1 && pi --version"
 )
 
 # Pi's JSON print mode can exit zero after an assistant error. Inspect its final events inside
@@ -109,13 +119,16 @@ print(json.dumps({
 class ProxyClient:
     """Control and recording endpoints of ``training.carry.proxy`` (synchronous; call off-loop)."""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, api_key: str = ""):
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
 
     def _request(self, method: str, path: str, body: dict | None = None, timeout: float = 60.0) -> Any:
         data = json.dumps(body).encode() if body is not None else (b"{}" if method == "POST" else None)
-        req = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as response:
             raw = response.read()
         return json.loads(raw) if raw else {}
@@ -286,13 +299,18 @@ class SandboxEpisodeDriver:
         self.settings = settings
         self.args = args
         self.backend = backend or get_backend(settings.sandbox_backend)
-        self.proxy = proxy or ProxyClient(settings.proxy_url)
+        self.proxy = proxy or ProxyClient(settings.proxy_url,
+                                          api_key=os.environ.get(settings.proxy_api_key_env, ""))
         if not settings.proxy_public_url:
             raise RuntimeError("proxy_public_url is unset; Pi inside a sandbox cannot reach the "
                                "trainer's loopback")
         self.public_url = settings.proxy_public_url.rstrip("/")
         self.max_turns = int(settings.max_turns)
-        self.pi_package = f"{DEFAULT_PI_PACKAGE}@{settings.pi_version}" if settings.pi_version else _default_pi_package()
+        self.pi_package = pi_package_spec(settings.pi_version or _default_pi_version(),
+                                          getattr(settings, "pi_package", ""))
+        if getattr(settings, "network", "allowlist") != "public" and getattr(self.backend, "name", "") == "docker":
+            logger.warning("[pi] the Docker backend cannot enforce the solver allowlist; sandboxes "
+                           "have open egress (the Modal backend enforces it)")
         self._live = threading.Semaphore(int(settings.max_live_sandboxes))
         self._install_sem = asyncio.Semaphore(INSTALL_CONCURRENCY)
         self._pending: set[CarrySandbox] = set()
@@ -400,7 +418,8 @@ class SandboxEpisodeDriver:
         spec = SandboxSpec(image=image, cpu=int(self.settings.sandbox_cpu),
                            memory_gib=int(self.settings.sandbox_memory_gib),
                            timeout_s=int(self._timeout() + self.settings.max_paused_s + 600),
-                           workdir=meta.get("workdir") or "/app",
+                           workdir=meta.get("workdir") or self.settings.sandbox_workdir,
+                           domain_allowlist=self._allowed_hosts(meta),
                            name=f"{self.settings.run_id}-{episode_id}")
         try:
             sandbox = await self.backend.create(spec)
@@ -423,6 +442,17 @@ class SandboxEpisodeDriver:
                 logger.warning("[pi] release after failed setup did not complete")
             raise
         return sb
+
+    def _allowed_hosts(self, meta: dict) -> list[str] | None:
+        """The solver's network, as the repository's Harbor trials apply it: an allowlist of the
+        proxy's host, the hosts Pi installs from, and whatever the task itself allows. None opens
+        the network (``AES_SOLVER_NETWORK=public``)."""
+        if getattr(self.settings, "network", "allowlist") == "public":
+            return None
+        hosts = [h for h in (urlsplit(self.public_url).hostname,) if h]
+        hosts += list(_pi_install_hosts())
+        hosts += task_allowed_hosts(meta.get("task_dir") or "")
+        return sorted(dict.fromkeys(hosts))
 
     async def _install_pi(self, sb: CarrySandbox) -> None:
         async with self._install_sem:
@@ -454,12 +484,12 @@ class SandboxEpisodeDriver:
                         "contextWindow": int(getattr(self.args, "rollout_max_context_len", 98304)),
                         "maxTokens": int(getattr(self.args, "rollout_max_response_len", 16384)),
                         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}
-        payload = json.dumps(models, indent=2)
-        plant = ('mkdir -p "$HOME/.pi/agent"; cat > "$HOME/.pi/agent/models.json" <<\'PI_MODELS_EOF\'\n'
-                 f"{payload}\nPI_MODELS_EOF\n"
-                 'grep -q "/v1/ep/" "$HOME/.pi/agent/models.json" || { echo "PLANT FAIL" >&2; exit 1; }; '
-                 "echo PLANT_OK")
-        res = await sb.sandbox.exec("bash", "-lc", plant, timeout_s=120)
+        await sb.sandbox.write_file(f"{PI_CONFIG_DIR}/models.json",
+                                    (json.dumps(models, indent=2) + "\n").encode("utf-8"))
+        # Fail loudly rather than fall back to api.openai.com, which would spend money and
+        # record nothing.
+        res = await sb.sandbox.exec("bash", "-lc", f'grep -q "/v1/ep/" {PI_CONFIG_DIR}/models.json && echo PLANT_OK',
+                                    timeout_s=120)
         if "PLANT_OK" not in (res.stdout or ""):
             raise RuntimeError(f"models.json plant failed: {res.stdout} {res.stderr}")
 
@@ -489,8 +519,9 @@ class SandboxEpisodeDriver:
                   f"echo EXIT=$rc; exit $rc; }} < {shlex.quote(prompt_path)}")
         key = os.environ.get(self.settings.proxy_api_key_env, "") or "proxy"
         exec_timeout = int(sandbox.wall_remaining(self._timeout()))
-        waiter = asyncio.create_task(sandbox.sandbox.exec("bash", "-lc", launch, timeout_s=exec_timeout,
-                                                          env={"OPENAI_API_KEY": key}))
+        waiter = asyncio.create_task(sandbox.sandbox.exec(
+            "bash", "-lc", launch, timeout_s=exec_timeout,
+            env={"OPENAI_API_KEY": key, "PI_CODING_AGENT_DIR": PI_CONFIG_DIR}))
         sandbox.waiter = waiter
         parked = await self._await_pi(sandbox, should_abort, self._remaining(sandbox), waiter)
         return await self._finish(sample, sandbox, parked)
@@ -600,11 +631,20 @@ class SandboxEpisodeDriver:
                 raise TimeoutError("verifier wall-clock budget exhausted")
             return left
 
+        # Nothing from before this run may score it: the agent could have planted a reward file
+        # or a tests directory, and an earlier verifier attempt could have left one behind. Pi
+        # has exited by now, so after the reset only test.sh can write the reward.
+        fresh = await sandbox.sandbox.exec("bash", "-lc", "rm -rf /tests /logs/verifier && mkdir -p /tests /logs/verifier",
+                                           timeout_s=int(min(remaining(), 60)), workdir="/")
+        if fresh.returncode or fresh.timed_out:
+            raise RuntimeError(f"could not reset the verifier directories: {fresh.stderr or fresh.stdout}")
         await sandbox.sandbox.upload_dir(tests, "/tests")
         res = await sandbox.sandbox.exec(
-            "bash", "-lc", "mkdir -p /logs/verifier && cd /tests && bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1; "
-                           "echo RC=$?; cat /logs/verifier/reward.txt 2>/dev/null || cat /logs/verifier/reward.json 2>/dev/null",
-            timeout_s=int(remaining()))
+            "bash", "-lc", "bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1; echo RC=$?; "
+                           "if [ -s /logs/verifier/reward.txt ]; then echo REWARD_TXT; cat /logs/verifier/reward.txt; "
+                           "elif [ -s /logs/verifier/reward.json ]; then echo REWARD_JSON; cat /logs/verifier/reward.json; "
+                           "else echo NO_REWARD; tail -c 2000 /logs/verifier/test-stdout.txt; fi",
+            timeout_s=int(remaining()), workdir=self.settings.sandbox_workdir)
         if res.timed_out:
             raise RuntimeError("verifier timed out")
         return parse_reward_output(res.stdout or "")
@@ -641,11 +681,14 @@ def apply_recording(sample: Any, rec: dict, *, max_context: int = 0) -> None:
 
 
 def parse_reward_output(text: str) -> float:
-    """The reward from a verifier run: ``reward.txt`` (one number) or ``reward.json`` (flat mapping)."""
-    tail = text.split("RC=", 1)[1] if "RC=" in text else text
-    body = tail.split("\n", 1)[1].strip() if "\n" in tail else ""
-    if not body:
-        raise RuntimeError(f"verifier wrote no reward file: {text[-500:]}")
+    """The reward from a verifier run: ``reward.txt`` (one number) or ``reward.json`` (flat
+    mapping), written by this run's ``test.sh``. No reward file is a verifier failure."""
+    marker = re.search(r"^(REWARD_TXT|REWARD_JSON|NO_REWARD)$", text, re.MULTILINE)
+    if marker is None:
+        raise RuntimeError(f"verifier produced no reward marker: {text[-500:]}")
+    body = text[marker.end():].strip()
+    if marker.group(1) == "NO_REWARD" or not body:
+        raise RuntimeError(f"verifier wrote no reward file: {body[-500:]}")
     try:
         parsed = json.loads(body)
     except ValueError:
@@ -675,9 +718,53 @@ def _prompt_text(sample: Any) -> str:
     return str(prompt)
 
 
-def _default_pi_package() -> str:
+def pi_package_spec(version: str, package: str = "") -> str:
+    """``<package>@<version>`` with the npm scope Harbor uses for that version: the package was
+    renamed at 0.74.0 and the old scope has no later releases."""
+    if not package:
+        package = CURRENT_PI_PACKAGE
+        try:
+            if tuple(int(p) for p in version.split(".")[:3]) < PI_PACKAGE_RENAME_VERSION:
+                package = LEGACY_PI_PACKAGE
+        except ValueError:
+            pass
+    return f"{package}@{version or 'latest'}"
+
+
+def _default_pi_version() -> str:
     try:
         from autoenvscaling.calibration.solver import PI_VERSION
-        return f"{DEFAULT_PI_PACKAGE}@{PI_VERSION}"
+        return PI_VERSION
     except Exception:  # noqa: BLE001
-        return f"{DEFAULT_PI_PACKAGE}@latest"
+        return "latest"
+
+
+def _pi_install_hosts() -> tuple[str, ...]:
+    try:
+        from autoenvscaling.calibration.solver import PI_INSTALL_HOSTS
+        return tuple(PI_INSTALL_HOSTS)
+    except Exception:  # noqa: BLE001
+        return ("raw.githubusercontent.com", "github.com", "nodejs.org", "registry.npmjs.org")
+
+
+def task_allowed_hosts(task_dir: str) -> list[str]:
+    """Hosts a task's ``task.toml`` allows under ``network_mode = "allowlist"`` (as
+    ``validation.harbor_runner.stage_task`` merges them). A task that names an ``[agent] user``
+    is logged: the sandbox interface runs commands as the image's default user."""
+    if not task_dir:
+        return []
+    path = Path(task_dir) / "task.toml"
+    if not path.is_file():
+        return []
+    try:
+        config = tomllib.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    agent = config.get("agent")
+    if isinstance(agent, dict) and agent.get("user"):
+        logger.warning("[pi] task %s sets agent.user=%r; the sandbox backends run as the image's "
+                       "default user", path.parent.name, agent["user"])
+    environment = config.get("environment") or {}
+    if environment.get("network_mode") == "allowlist":
+        return [str(h) for h in (environment.get("allowed_hosts") or [])]
+    return []

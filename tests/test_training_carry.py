@@ -540,6 +540,27 @@ async def test_abort_drain_cancels_stragglers_and_their_sandboxes_are_released(r
     registry.assert_no_leaks()
 
 
+async def test_cut_bounds_the_initial_abort_request(registry):
+    source = FakeSource({0: [1.0, 0.0]})
+    driver = FakeDriver(rewards={"group-0-r0": 1.0, "group-0-r1": 0.0})
+    state = ro.RolloutState()
+    version = lc.CLOCK.begin(0)
+
+    async def never_returns():
+        await asyncio.sleep(3600)
+
+    gate = FakeGate()
+    hooks = ro.CarryHooks(RULES, registry=registry, gate=gate, abort_engines=never_returns, held=lambda: 0)
+    cfg = ro.LoopConfig(rollout_batch_size=1, n_samples_per_prompt=N, over_sampling_batch_size=1,
+                        max_concurrent_episodes=4, abort_request_timeout_s=0.05, abort_drain_timeout_s=1,
+                        wait_timeout_s=0.01)
+    run_group = make_run_group(driver, registry, state, version=version, rollout_id=0)
+    result = await asyncio.wait_for(
+        ro.collect_batch(cfg, data_source=source.get_samples, run_group=run_group, dynamic_filter=zero_std,
+                         hooks=hooks, state=state, rollout_id=0), 5)
+    assert len(result.data) == 1 and gate.calls == ["park", "quiesce"]
+
+
 async def test_exhausted_source_raises_instead_of_training_short(registry):
     source = FakeSource({0: [1.0, 1.0]})
     driver = FakeDriver(rewards={"group-0-r0": 1.0, "group-0-r1": 1.0})
@@ -603,6 +624,15 @@ def test_settings_from_env_and_launcher_forwarding():
            "AES_CARRY_EPISODE_TIMEOUT_S": "600", "AES_PROXY_API_KEY": "k", "MILES_DIR": "/m", "MEGATRON_DIR": "/g"}
     settings = ro.CarrySettings.from_env(env)
     assert settings.max_concurrent_episodes == 32 and settings.episode_timeout_s == 600.0
+    # sandboxes follow the repository's solver settings unless overridden
+    assert (settings.sandbox_backend, settings.sandbox_cpu, settings.sandbox_memory_gib, settings.network) == \
+        ("modal", 4, 8, "allowlist")
+    repo = ro.CarrySettings.from_env({"AES_SANDBOX_BACKEND": "docker", "AES_SANDBOX_SOLVER_CPU": "2",
+                                      "AES_SOLVER_NETWORK": "public", "AES_CARRY_SANDBOX_MEMORY_GIB": "16"})
+    assert (repo.sandbox_backend, repo.sandbox_cpu, repo.sandbox_memory_gib, repo.network) == ("docker", 2, 16, "public")
+    assert ro.CarrySettings.from_env({"AES_CARRY_NETWORK": "open"}).problems(16)
+    gate = lc.HttpGate("http://proxy:30000/", api_key="k")
+    assert gate._headers()["Authorization"] == "Bearer k" and gate.base_url == "http://proxy:30000"
     assert settings.problems(16) == [] and settings.problems(64)
     assert settings.to_env()["AES_CARRY_CARRY_ALLOWANCE"] == "32"
     assert ro.CarrySettings.from_env({}).problems(16) == [("proxy_public_url is required (sandboxes cannot reach "

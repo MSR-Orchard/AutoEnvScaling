@@ -221,6 +221,12 @@ def observe_prompt(ep: Episode, input_ids: list[int], *, max_context: int,
             trace({"ep": ep.episode_id, "event": "rollback", "dropped_tokens": dropped})
         n = min(len(ep.tokens), len(input_ids))
         first = next((i for i in range(n) if input_ids[i] != ep.tokens[i]), n)
+    if len(input_ids) < len(ep.tokens):
+        # Shorter than the committed recording even after the rollback: the client lost more
+        # than one provisional generation, and generating from this prompt would record tokens
+        # the engine never saw in that context.
+        raise ProxyError(409, f"render ({len(input_ids)} tokens) is shorter than the committed "
+                              f"recording ({len(ep.tokens)} tokens); refusing to generate")
     if first < n:
         recorded = decode(ep.tokens[first:first + 24]) if decode else "?"
         rendered = decode(input_ids[first:first + 24]) if decode else "?"
@@ -628,6 +634,8 @@ class Proxy:
 
         # Context budget: a hard engine/trainer limit, not a turn policy. Out of room, tell the
         # agent to stop; everything recorded so far is a valid, merely shorter, trajectory.
+        if len(input_ids) <= self.config.max_context and ep.tokens != input_ids:
+            raise ProxyError(500, "recording and engine input diverged; refusing to generate")
         room = self.config.max_context - len(input_ids)
         want = int(body.get("max_tokens") or 2048)
         if room <= self.config.min_room or ep.turns >= self.config.max_turns:
@@ -720,6 +728,29 @@ def build_app(proxy: Proxy):
         raise RuntimeError("fastapi is not installed; install autoenvscaling[carry]")
     app = FastAPI()
 
+    class AuthMiddleware:
+        """Every endpoint needs the bearer when a key is configured (the control surface can
+        change the backend, open the gates and read or delete recordings); only /healthz is open."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http" and scope.get("path") != "/healthz":
+                headers = dict(scope.get("headers") or [])
+                try:
+                    proxy.check_auth(headers.get(b"authorization", b"").decode("latin-1"))
+                except ProxyError as exc:
+                    await JSONResponse({"detail": exc.detail}, status_code=exc.status)(scope, receive, send)
+                    return
+            await self.inner(scope, receive, send)
+
+    app.add_middleware(AuthMiddleware)
+
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        return {"ok": True, "carry_lifecycle_version": CARRY_LIFECYCLE_VERSION}
+
     @app.exception_handler(ProxyError)
     async def _proxy_error(request, exc: ProxyError):
         return JSONResponse({"detail": exc.detail}, status_code=exc.status)
@@ -770,7 +801,6 @@ def build_app(proxy: Proxy):
 
     @app.post("/v1/ep/{episode_id}/chat/completions")
     async def chat_completions(episode_id: str, request: Request):
-        proxy.check_auth(request.headers.get("authorization"))
         body = await request.json()
         served = proxy.config.served_id
         if not body.get("stream"):

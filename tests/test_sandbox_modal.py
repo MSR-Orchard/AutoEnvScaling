@@ -145,6 +145,15 @@ def test_domain_allowlist_is_passed_through(fake):
     assert kwargs["outbound_domain_allowlist"] == ["pypi.org"]
 
 
+def test_spec_domain_allowlist_overrides_the_backend_default(fake):
+    backend = ModalBackend(modal_module=fake, domain_allowlist=["pypi.org"])
+    kwargs = backend.create_kwargs(SandboxSpec(image="img", domain_allowlist=["proxy.example"]), app="app")
+    assert kwargs["outbound_domain_allowlist"] == ["proxy.example"]
+    kwargs = ModalBackend(modal_module=fake).create_kwargs(SandboxSpec(image="img", domain_allowlist=["a.b"]),
+                                                            app="app")
+    assert kwargs["outbound_domain_allowlist"] == ["a.b"]
+
+
 def test_blocked_hosts_script_is_idempotent_and_validated(tmp_path):
     hosts = tmp_path / "hosts"
     hosts.write_text("")

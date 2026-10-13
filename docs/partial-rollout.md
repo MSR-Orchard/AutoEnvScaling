@@ -140,15 +140,41 @@ admission of a sandbox never blocks a worker thread.
   cancel-on-error, surplus completed groups carried, final-batch validation); `rollout_manager`'s
   shutdown hook became the last-rollout drain plus an `atexit` backstop; the HTTP timeout hunk
   is unnecessary because the proxy, not Miles' client, calls `/generate`.
-* **Sandboxes are the release's `autoenvscaling.sandbox` backends** (Docker, Modal) started from
-  the environment image named in the prompt row (`metadata["image"]`, with `task_dir` for the
-  verifier), not the sandbox service of the research cluster. Orphans of a previous process are
-  removed by container-name prefix (`<run_id>-`) on the Docker backend; the Modal backend has no
-  listing here and logs the prefix instead.
+* **Sandboxes are the release's `autoenvscaling.sandbox` backends** started from the environment
+  image named in the prompt row (`metadata["image"]`, with `task_dir` for the verifier), not the
+  sandbox service of the research cluster. Their settings are the repository's own solver
+  settings unless `AES_CARRY_*` overrides them: the backend from `Settings.sandbox.backend`
+  (Modal by default), `solver_cpu` (4) and `solver_memory_gib` (8), the Terminal-Bench working
+  directory `/app`, and the solver network mode (`AES_SOLVER_NETWORK`, allowlist by default).
+  Under the allowlist a sandbox may reach only the proxy's host, the hosts Pi installs from
+  (`PI_INSTALL_HOSTS`) and whatever the task's `task.toml` allows, exactly as the Harbor trials
+  of the calibration path; the Modal backend enforces it (`SandboxSpec.domain_allowlist`, which
+  the backend previously ignored), the Docker backend cannot and says so. The research run used
+  2 CPUs per sandbox; the release keeps the repository's 4. A task that sets `[agent] user` is
+  logged: the sandbox interface runs commands as the image's default user. Orphans of a previous
+  process are removed by name prefix (`<run_id>-`): on Docker by container name, on Modal by the
+  `aes.name` tag (untested against the live SDK, see section 5).
+* **Pi is installed as Harbor installs it**: `@earendil-works/pi-coding-agent@0.80.6`
+  (`calibration.solver.PI_VERSION`; the old `@mariozechner` scope stopped at 0.73.1 and is
+  deprecated on npm, so the research launcher's package name no longer resolves), with
+  `npm install -g --ignore-scripts` after Harbor's nvm/Node 22 snippet, and its endpoint
+  configuration in `PI_CODING_AGENT_DIR` rather than the home directory. `AES_CARRY_PI_PACKAGE`
+  and `AES_CARRY_PI_VERSION` override both.
 * **Verification is the task's `tests/test.sh`** writing `/logs/verifier/reward.{txt,json}`
   (the convention every other check in this repository uses), rather than a pytest source
-  embedded in the research artifact. The research driver also ran an initial-state check before
-  the agent; the release's tasks have no such check and none is run.
+  embedded in the research artifact. `/tests` and `/logs/verifier` are removed and recreated
+  after Pi has exited and before the tests are uploaded, so a reward file planted by the agent
+  or left by an earlier attempt can never score the episode; a run that writes no reward file
+  is a verifier failure (the episode is dropped), never a reward. The research driver also ran
+  an initial-state check before the agent; the release's tasks have no such check and none is
+  run.
+* **The proxy authenticates every endpoint** with `AES_PROXY_API_KEY` (only `/healthz` is
+  open): the control surface can change the engine address, open the gates and read or delete
+  recordings, and the research proxy only protected completions. The driver and the rollout's
+  gate client send the same key. A render that is shorter than the committed recording even
+  after the provisional rollback is refused (409) instead of being generated from, and the
+  initial `abort_request` at the cut is bounded (`AES_CARRY_ABORT_REQUEST_TIMEOUT_S`, 60 s)
+  so a silent router cannot hold the cut forever; quiescence is still confirmed or refused.
 * **Settings travel as environment variables** (`AES_CARRY_*`, `AES_PROXY_*`; forwarded to the
   Ray workers by the launcher) instead of `--spare-*` arguments, because the release launches
   Miles' own `train.py`.
@@ -183,6 +209,9 @@ admission of a sandbox never blocks a worker thread.
   loop's proposer updates).
 * **Throughput numbers** in the launcher comments (over-sampling 24 -> 40 walk, drop rate 2.06x
   mean) are quoted there from monitoring, not re-measured here.
+* **Modal orphan removal** uses `modal.Sandbox.list` and sandbox tags; the Modal SDK is not
+  installed on the machine this was written on, so that call path is covered only by the test
+  fakes. A listing failure is logged and leaves the orphans in place.
 
 ## 6. 16 x 16 (paper) versus 8 x 32 (older carry launcher)
 
@@ -240,6 +269,9 @@ AES_CARRY_MAX_LIVE_SANDBOXES=64 AES_CARRY_MAX_CONCURRENT_EPISODES=48 AES_CARRY_C
 ```
 
 `python -m autoenvscaling.training.carry check` validates the `AES_CARRY_*` settings offline.
+Set `AES_PROXY_API_KEY` identically for the proxy, the Miles job (the launcher forwards it to
+the rollout workers) and the sandboxes (Pi receives it as `OPENAI_API_KEY`); every proxy
+endpoint except `/healthz` requires it.
 The prompt rows need `metadata.image` (a built image of the environment) and
 `metadata.task_dir`; `Pool.export_prompt_data` writes `task_dir`, and the image is the
 environment's build (`metadata["image"]`), produced by the user's image pipeline.

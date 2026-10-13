@@ -87,13 +87,19 @@ class StillActive(RuntimeError):
 class HttpGate:
     """The proxy's control endpoints over HTTP (``training.carry.proxy``)."""
 
-    def __init__(self, base_url: str, timeout_s: float = 30.0):
+    def __init__(self, base_url: str, timeout_s: float = 30.0, api_key: str = ""):
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
+        self.api_key = api_key
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def _post(self, action: str) -> dict:
-        req = urllib.request.Request(f"{self.base_url}/{action}", data=b"{}",
-                                     headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(f"{self.base_url}/{action}", data=b"{}", headers=self._headers())
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_s) as response:
                 return json.loads(response.read())
@@ -117,7 +123,8 @@ class HttpGate:
         return self._post("quiesce")
 
     def check(self) -> None:
-        with urllib.request.urlopen(f"{self.base_url}/config", timeout=self.timeout_s) as response:
+        req = urllib.request.Request(f"{self.base_url}/config", headers=self._headers())
+        with urllib.request.urlopen(req, timeout=self.timeout_s) as response:
             config = json.loads(response.read())
         if config.get("carry_lifecycle_version", 0) < 1:
             raise RuntimeError("the proxy does not implement the carry lifecycle (version >= 1)")
@@ -140,7 +147,10 @@ async def after_engine_abort(gate: GateControl, *,
                 await asyncio.wait_for(stop.wait(), timeout=QUIESCE_ABORT_INTERVAL_S)
                 return
             except TimeoutError:
-                await asyncio.wait_for(abort_engines(), timeout=5.0)
+                try:
+                    await asyncio.wait_for(abort_engines(), timeout=5.0)
+                except Exception as exc:  # noqa: BLE001 - keep sweeping; quiescence decides
+                    logger.warning("[carry] abort sweep failed: %s", exc)
 
     repeater = asyncio.create_task(repeat()) if abort_engines is not None else None
     try:
