@@ -135,10 +135,11 @@ tests/            unit tests (live tests need credentials: AES_LIVE_TESTS=1)
 
 ```bibtex
 @misc{yu2026autoenvscaling,
-  title={AutoEnvScaling: Automating the Data Flywheel with Terminal Agents},
+  title={{AutoEnvScaling}: Automating the Data Flywheel with Terminal Agents},
   author={Simon Yu and Baolin Peng and Bo Liu and Zhengyan Shi and Zhaoyang Wang and Hao Cheng and Qianhui Wu and Wenlin Yao and Natasha Jaques and Weiyan Shi and Jianfeng Gao},
   year={2026},
-  note={arXiv preprint, to appear}
+  note={Preprint},
+  url={https://auto-env-scaling.github.io}
 }
 ```
 
