@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import hashlib
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, fields
@@ -93,10 +95,11 @@ class CarrySettings:
     sandbox_memory_gib: int = 0                      # 0 -> Settings.sandbox.solver_memory_gib
     sandbox_workdir: str = "/app"                    # the Terminal-Bench task convention
     network: str = ""                                # "" -> AES_SOLVER_NETWORK ("allowlist" | "public")
-    run_id: str = "aes-carry"                        # names sandboxes so orphans can be reaped
+    run_id: str = ""                                 # "" -> derived from the Miles save dir
+    lease_stale_s: float = 900.0                     # a process silent this long is dead
     pi_version: str = ""                             # default: calibration.solver.PI_VERSION
     pi_package: str = ""                             # default: the scope Harbor uses for that version
-    state_dir: str = ""                              # where per-rollout carry manifests go
+    state_dir: str = ""                              # "" -> <save dir>/carry (manifests, leases)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> CarrySettings:
@@ -134,6 +137,22 @@ class CarrySettings:
         if self.sandbox_backend not in ("", "modal", "docker"):
             out.append("sandbox_backend must be 'modal' or 'docker'")
         return out
+
+
+def resolve_identity(settings: CarrySettings, save_dir: str) -> CarrySettings:
+    """Default the run identity to the Miles save directory, which already identifies one
+    training job and is shared by its restarts: two jobs never share a checkpoint directory,
+    so they never share a run id or a state directory."""
+    save = Path(save_dir).resolve() if save_dir else None
+    if not settings.run_id:
+        if save is None:
+            raise RuntimeError("carry needs AES_CARRY_RUN_ID when Miles has no --save directory")
+        digest = hashlib.sha1(str(save).encode()).hexdigest()[:6]
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", save.name).strip("-") or "run"
+        settings.run_id = f"aes-{stem}-{digest}"
+    if not settings.state_dir and save is not None:
+        settings.state_dir = str(save / "carry")
+    return settings
 
 
 def _coerce(default: Any, raw: str) -> Any:
@@ -408,7 +427,7 @@ def _runtime(args: Any) -> dict[str, Any]:
         return _RUNTIME
     from autoenvscaling.training.carry.driver import SandboxEpisodeDriver
 
-    settings = CarrySettings.from_env()
+    settings = resolve_identity(CarrySettings.from_env(), str(getattr(args, "save", "") or ""))
     problems = settings.problems(args.n_samples_per_prompt)
     problems += config_problems(args)
     if problems:
@@ -418,11 +437,12 @@ def _runtime(args: Any) -> dict[str, Any]:
                           episode_timeout_s=settings.episode_timeout_s,
                           max_context_len=int(getattr(args, "rollout_max_context_len", 0) or 0))
     driver = SandboxEpisodeDriver(settings, args)
+    driver.lease.write()   # before any sandbox exists: a later process must be able to attribute them
     gate = HttpGate(settings.proxy_url, api_key=os.environ.get(settings.proxy_api_key_env, ""))
     _RUNTIME.update(settings=settings, rules=rules, driver=driver, gate=gate,
                     registry=ep.get_registry(),
                     heartbeat=Heartbeat(ep.get_registry(), settings.heartbeat_s,
-                                        settings.episode_timeout_s),
+                                        settings.episode_timeout_s, on_sweep=driver.lease.touch),
                     first_rollout=True)
     atexit.register(_shutdown_sync)
     return _RUNTIME
@@ -461,6 +481,7 @@ def _shutdown_sync() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[carry] could not park the gate at shutdown: %s", exc)
         rt["registry"].drain()
+        rt["driver"].lease.release()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[carry] shutdown incomplete: %s", exc)
 
@@ -603,6 +624,7 @@ async def _generate(args, rollout_id, data_source, cfg, rt, dynamic_filter, samp
     result.metrics.update(rt["registry"].metrics())
     result.metrics.update(ep.COUNTERS.drain())
     result.metrics["carry/pending_cleanup"] = float(rt["driver"].pending_cleanup_count())
+    result.metrics["carry/live_sandboxes"] = float(rt["driver"].live_count())
     return result, result.aborted
 
 
@@ -610,6 +632,7 @@ async def _begin_rollout(args: Any, rollout_id: int, rt: dict[str, Any]) -> None
     settings: CarrySettings = rt["settings"]
     await asyncio.to_thread(rt["gate"].check)
     version = CLOCK.begin(rollout_id)
+    rt["driver"].lease.touch()
     if rt.pop("first_rollout", False):
         # Restart handling, explicit: the carry buffer and registry live in this process, so
         # after a restart nothing is carried. Say what the previous process held, and reap the
@@ -638,7 +661,8 @@ async def _shutdown(rt: dict[str, Any]) -> None:
         await asyncio.to_thread(rt["gate"].park)
     finally:
         rt["registry"].drain()
-    await rt["driver"].wait_cleanup(30.0)
+    await rt["driver"].close_all(30.0)
+    rt["driver"].lease.release()
 
 
 # ---- the log hook ----------------------------------------------------------------------------------

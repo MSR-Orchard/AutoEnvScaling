@@ -32,6 +32,7 @@ import math
 import os
 import re
 import shlex
+import socket
 import threading
 import time
 import tomllib
@@ -155,6 +156,61 @@ class ProxyClient:
                 raise
 
 
+# ---- instance leases ---------------------------------------------------------------------------------------
+class InstanceLease:
+    """Liveness record of one rollout process under ``state_dir/instances/<instance_id>.json``.
+
+    Written before the first sandbox is created and refreshed by the heartbeat thread, so a
+    later process of the same run can tell a crashed predecessor (stale heartbeat) from a
+    concurrent job (fresh heartbeat) before removing anything.
+    """
+
+    def __init__(self, state_dir: str, run_id: str, instance_id: str):
+        self.enabled = bool(state_dir)
+        self.dir = Path(state_dir) / "instances" if state_dir else None
+        self.run_id = run_id
+        self.instance_id = instance_id
+        self.started = time.time()
+
+    def path(self, instance_id: str | None = None) -> Path:
+        assert self.dir is not None
+        return self.dir / f"{instance_id or self.instance_id}.json"
+
+    def write(self) -> None:
+        if not self.enabled:
+            return
+        self.dir.mkdir(parents=True, exist_ok=True)
+        record = {"run_id": self.run_id, "instance_id": self.instance_id, "pid": os.getpid(),
+                  "host": socket.gethostname(), "started": self.started, "heartbeat": time.time()}
+        tmp = self.path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(record))
+        tmp.replace(self.path())
+
+    def touch(self) -> None:
+        self.write()
+
+    def release(self) -> None:
+        if self.enabled:
+            self.path().unlink(missing_ok=True)
+
+    def remove(self, instance_id: str) -> None:
+        if self.enabled:
+            self.path(instance_id).unlink(missing_ok=True)
+
+    def read_all(self) -> list[dict]:
+        if not self.enabled or not self.dir.is_dir():
+            return []
+        out = []
+        for path in sorted(self.dir.glob("*.json")):
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and record.get("instance_id"):
+                out.append(record)
+        return out
+
+
 # ---- one episode's sandbox -------------------------------------------------------------------------------
 class CarrySandbox:
     """A sandbox, its episode id, the Pi process that survives a park, and the time budget.
@@ -165,9 +221,11 @@ class CarrySandbox:
     """
 
     def __init__(self, sandbox: Sandbox, episode_id: str, *, loop: asyncio.AbstractEventLoop,
-                 release: Callable[[], None], proxy: ProxyClient, max_paused_s: float):
+                 release: Callable[[], None], proxy: ProxyClient, max_paused_s: float,
+                 on_closing: Callable[[], None] = lambda: None):
         self.sandbox = sandbox
         self.episode_id = episode_id
+        self._on_closing = on_closing
         self.created_at = time.monotonic()
         self.deadline: float | None = None
         self.max_paused_seconds = max_paused_s
@@ -257,6 +315,7 @@ class CarrySandbox:
             if self._close_future is None:
                 self._close_future = Future()
                 self._attempt = 0
+                self._on_closing()
                 waiter = self.waiter
                 if waiter is not None and not self._loop.is_closed():
                     self._loop.call_soon_threadsafe(waiter.cancel)
@@ -313,27 +372,57 @@ class SandboxEpisodeDriver:
                            "have open egress (the Modal backend enforces it)")
         self._live = threading.Semaphore(int(settings.max_live_sandboxes))
         self._install_sem = asyncio.Semaphore(INSTALL_CONCURRENCY)
-        self._pending: set[CarrySandbox] = set()
-        self._pending_lock = threading.Lock()
+        # Capacity accounting. A sandbox is ACTIVE from creation until close() starts (its
+        # episode is counted by the rollout's in-flight counter, or it is parked in the
+        # registry), then CLOSING until the backend confirmed the deletion. The two sets are
+        # disjoint so that the rollout's deficit (capacity - in_flight - held) never subtracts
+        # an active episode twice: `held` is the closing set only.
+        self._active: set[CarrySandbox] = set()
+        self._closing: set[CarrySandbox] = set()
+        self._state_lock = threading.Lock()
         self._proxy_configured = False
+        self.instance_id = uuid.uuid4().hex[:12]
+        self.lease = InstanceLease(settings.state_dir, settings.run_id, self.instance_id)
         self.__tokenizer = None
         self.__tokenizer_tried = False
 
     # ---- accounting ------------------------------------------------------------------------------
     def pending_cleanup_count(self) -> int:
-        with self._pending_lock:
-            return len(self._pending)
+        """Sandboxes whose deletion has started but is not confirmed: they hold capacity that
+        neither an in-flight episode nor the registry accounts for."""
+        with self._state_lock:
+            return len(self._closing)
+
+    def live_count(self) -> int:
+        """Sandboxes holding a capacity slot (active or closing)."""
+        with self._state_lock:
+            return len(self._active) + len(self._closing)
+
+    def _mark_closing(self, sb: CarrySandbox) -> None:
+        with self._state_lock:
+            self._active.discard(sb)
+            self._closing.add(sb)
 
     async def wait_cleanup(self, timeout_s: float) -> None:
-        with self._pending_lock:
-            pending = list(self._pending)
-        futures = [asyncio.wrap_future(sb.close()) for sb in pending]
+        """Wait for deletions already in progress (never starts new ones)."""
+        with self._state_lock:
+            closing = list(self._closing)
+        futures = [asyncio.wrap_future(sb.close()) for sb in closing]
+        if futures:
+            await asyncio.wait(futures, timeout=timeout_s)
+
+    async def close_all(self, timeout_s: float) -> None:
+        """Shutdown: release every sandbox this process still holds, then wait for confirmation."""
+        with self._state_lock:
+            held = list(self._active) + list(self._closing)
+        futures = [asyncio.wrap_future(sb.close()) for sb in held]
         if futures:
             await asyncio.wait(futures, timeout=timeout_s)
 
     def _release_slot(self, sb: CarrySandbox) -> None:
-        with self._pending_lock:
-            self._pending.discard(sb)
+        with self._state_lock:
+            self._active.discard(sb)
+            self._closing.discard(sb)
         self._live.release()
 
     @property
@@ -349,15 +438,46 @@ class SandboxEpisodeDriver:
                 logger.warning("[pi] could not load the reseed tokenizer from %s: %s", path, exc)
         return self.__tokenizer
 
+    def sandbox_name(self, episode_id: str) -> str:
+        """``<run_id>-<instance_id>-<episode_id>``: the run (one training job, stable across its
+        restarts) and the process that owns the sandbox, so cleanup never crosses either."""
+        return f"{self.settings.run_id}-{self.instance_id}-{episode_id}"
+
     async def reap_orphans(self) -> int:
-        """Remove sandboxes a previous process of this run left behind (not resumable)."""
+        """Remove sandboxes left by a *dead* previous process of this run.
+
+        Ownership is in the sandbox name (run and instance ids) and liveness in the instance
+        lease under ``state_dir`` (written before the first sandbox, refreshed by the heartbeat).
+        Only instances of this run whose lease has gone stale are reaped; a live instance, an
+        instance of another run, and sandboxes of unknown ownership are left alone. Without a
+        state directory nothing can be attributed, so nothing is reaped.
+        """
         reaper = getattr(self.backend, "remove_by_prefix", None)
         if reaper is None:
             logger.info("[pi] backend %s cannot list sandboxes; orphans of a previous process "
                         "must be removed by hand (prefix %s-)", getattr(self.backend, "name", "?"),
                         self.settings.run_id)
             return 0
-        return int(await reaper(f"{self.settings.run_id}-"))
+        if not self.lease.enabled:
+            logger.warning("[pi] no state_dir: sandboxes of a crashed process cannot be attributed "
+                           "and are not reaped")
+            return 0
+        removed = 0
+        stale_s = float(self.settings.lease_stale_s)
+        for lease in self.lease.read_all():
+            if lease.get("instance_id") == self.instance_id or lease.get("run_id") != self.settings.run_id:
+                continue
+            age = time.time() - float(lease.get("heartbeat") or 0)
+            if age < stale_s:
+                logger.info("[pi] instance %s of this run is alive (heartbeat %.0fs ago); leaving "
+                            "its sandboxes", lease["instance_id"], age)
+                continue
+            n = int(await reaper(f"{self.settings.run_id}-{lease['instance_id']}-"))
+            logger.warning("[pi] reaped %d sandboxes of dead instance %s (heartbeat %.0fs ago)",
+                           n, lease["instance_id"], age)
+            self.lease.remove(lease["instance_id"])
+            removed += n
+        return removed
 
     # ---- sandbox -----------------------------------------------------------------------------------
     def _meta(self, sample: Any) -> dict:
@@ -420,18 +540,19 @@ class SandboxEpisodeDriver:
                            timeout_s=int(self._timeout() + self.settings.max_paused_s + 600),
                            workdir=meta.get("workdir") or self.settings.sandbox_workdir,
                            domain_allowlist=self._allowed_hosts(meta),
-                           name=f"{self.settings.run_id}-{episode_id}")
+                           name=self.sandbox_name(episode_id))
         try:
             sandbox = await self.backend.create(spec)
         except BaseException:
             self._live.release()
             raise
         sb = CarrySandbox(sandbox, episode_id, loop=loop, release=release_once, proxy=self.proxy,
-                          max_paused_s=float(self.settings.max_paused_s))
+                          max_paused_s=float(self.settings.max_paused_s),
+                          on_closing=lambda: self._mark_closing(sb_holder[0]))
         sb_holder.append(sb)
         sb.deadline = sb.created_at + self._timeout()
-        with self._pending_lock:
-            self._pending.add(sb)
+        with self._state_lock:
+            self._active.add(sb)
         logger.info("[carry] sandbox episode=%s image=%s", episode_id, image)
         try:
             await asyncio.wait_for(self._install_pi(sb), self._remaining(sb))
@@ -680,31 +801,58 @@ def apply_recording(sample: Any, rec: dict, *, max_context: int = 0) -> None:
     assert len(sample.rollout_log_probs) == sample.response_length
 
 
+class VerifierFailed(RuntimeError):
+    """The verifier did not produce a usable score; the episode is dropped, never rewarded."""
+
+
+# The verifier contract. Harbor itself ignores ``test.sh``'s exit status and lets the reward
+# file decide, and the admitted tasks were validated under that rule, so a failing test suite
+# may legitimately leave a nonzero status (pytest exits 1 when tests fail). The carry therefore
+# accepts exit 0 (success) and exit 1 (ordinary failure) together with a fresh, well-formed
+# reward in [0, 1]. Everything else means the verifier did not complete and is a failure:
+# any other exit status (pytest 2-5, 124 timeout, 126/127 command not found, 128+ signals),
+# no reward file, a malformed reward, or exit 1 reporting a full reward (a contradiction).
+ORDINARY_EXIT_CODES = (0, 1)
+
+
 def parse_reward_output(text: str) -> float:
-    """The reward from a verifier run: ``reward.txt`` (one number) or ``reward.json`` (flat
-    mapping), written by this run's ``test.sh``. No reward file is a verifier failure."""
+    """Apply the verifier contract to the verify command's output: an ``RC=<status>`` line,
+    then ``REWARD_TXT``/``REWARD_JSON`` followed by the file this run wrote, or ``NO_REWARD``."""
+    status_line = re.search(r"^RC=(\d+)$", text, re.MULTILINE)
     marker = re.search(r"^(REWARD_TXT|REWARD_JSON|NO_REWARD)$", text, re.MULTILINE)
-    if marker is None:
-        raise RuntimeError(f"verifier produced no reward marker: {text[-500:]}")
+    if status_line is None or marker is None:
+        raise VerifierFailed(f"verifier output has no status or reward marker: {text[-500:]}")
+    exit_code = int(status_line.group(1))
     body = text[marker.end():].strip()
+    if exit_code not in ORDINARY_EXIT_CODES:
+        raise VerifierFailed(f"verifier exited with status {exit_code}; its output is not a score: "
+                             f"{body[-300:]}")
     if marker.group(1) == "NO_REWARD" or not body:
-        raise RuntimeError(f"verifier wrote no reward file: {body[-500:]}")
+        raise VerifierFailed(f"verifier wrote no reward file (exit {exit_code}): {body[-300:]}")
     try:
         parsed = json.loads(body)
     except ValueError:
         parsed = body
-    if isinstance(parsed, dict):
-        if "reward" in parsed:
-            value = parsed["reward"]
-        elif parsed and all(isinstance(v, (int, float)) for v in parsed.values()):
-            value = sum(float(v) for v in parsed.values()) / len(parsed)
+    try:
+        if isinstance(parsed, dict):
+            if "reward" in parsed:
+                value = float(parsed["reward"])
+            elif parsed and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                for v in parsed.values()):
+                value = sum(float(v) for v in parsed.values()) / len(parsed)
+            else:
+                raise VerifierFailed(f"reward.json has no numeric reward: {body[:200]}")
+        elif isinstance(parsed, (bool, list)) or parsed is None:
+            raise VerifierFailed(f"malformed reward: {body[:200]}")
         else:
-            raise RuntimeError(f"reward.json has no numeric reward: {body[:200]}")
-    else:
-        value = float(str(parsed).strip().split()[0])
-    value = float(value)
-    if not math.isfinite(value):
-        raise RuntimeError("verifier reward is not finite")
+            value = float(str(parsed).strip().split()[0])
+    except (TypeError, ValueError) as exc:
+        raise VerifierFailed(f"malformed reward: {body[:200]}") from exc
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise VerifierFailed(f"reward {value!r} is not a fraction in [0, 1]")
+    if exit_code == 1 and value >= 1.0:
+        raise VerifierFailed("verifier exited with status 1 (tests failed) but reported a full "
+                             "reward; refusing the contradiction")
     return round(value, 6)
 
 

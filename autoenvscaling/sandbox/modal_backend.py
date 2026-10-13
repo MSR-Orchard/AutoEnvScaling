@@ -227,7 +227,7 @@ class ModalBackend:
         app = await self._get_app()
         removed = 0
         try:
-            async for sb in modal.Sandbox.list.aio(app_id=app.app_id):
+            async for sb in modal.Sandbox.list.aio(app_id=getattr(app, "app_id", None)):
                 tags = await sb.get_tags.aio()
                 if str((tags or {}).get("aes.name", "")).startswith(prefix):
                     await sb.terminate.aio()

@@ -151,9 +151,19 @@ admission of a sandbox never blocks a worker thread.
   of the calibration path; the Modal backend enforces it (`SandboxSpec.domain_allowlist`, which
   the backend previously ignored), the Docker backend cannot and says so. The research run used
   2 CPUs per sandbox; the release keeps the repository's 4. A task that sets `[agent] user` is
-  logged: the sandbox interface runs commands as the image's default user. Orphans of a previous
-  process are removed by name prefix (`<run_id>-`): on Docker by container name, on Modal by the
-  `aes.name` tag (untested against the live SDK, see section 5).
+  logged: the sandbox interface runs commands as the image's default user.
+* **Run identity and orphan removal.** A sandbox is named `<run_id>-<instance_id>-<episode>`:
+  the run id defaults to the Miles save directory (one training job, shared by its restarts,
+  never by two jobs; `AES_CARRY_RUN_ID` overrides) and the instance id is one rollout process.
+  Each process writes a liveness lease under `<state_dir>/instances/` before its first sandbox
+  and refreshes it from the heartbeat thread. On start a process removes only the sandboxes of
+  instances of its own run whose lease is stale (`AES_CARRY_LEASE_STALE_S`, 900 s): a live
+  instance, another run, and sandboxes with no lease are never touched, and without a state
+  directory nothing is reaped. Docker removes by container-name prefix, Modal by the `aes.name`
+  tag (untested against the live SDK, see section 5).
+* **Capacity accounting.** The rollout's admission deficit is `capacity - in_flight - held`,
+  where `held` counts only sandboxes whose deletion has started but is not confirmed; active
+  sandboxes are counted once, by the in-flight counter (or by the registry while parked).
 * **Pi is installed as Harbor installs it**: `@earendil-works/pi-coding-agent@0.80.6`
   (`calibration.solver.PI_VERSION`; the old `@mariozechner` scope stopped at 0.73.1 and is
   deprecated on npm, so the research launcher's package name no longer resolves), with
@@ -164,10 +174,14 @@ admission of a sandbox never blocks a worker thread.
   (the convention every other check in this repository uses), rather than a pytest source
   embedded in the research artifact. `/tests` and `/logs/verifier` are removed and recreated
   after Pi has exited and before the tests are uploaded, so a reward file planted by the agent
-  or left by an earlier attempt can never score the episode; a run that writes no reward file
-  is a verifier failure (the episode is dropped), never a reward. The research driver also ran
-  an initial-state check before the agent; the release's tasks have no such check and none is
-  run.
+  or left by an earlier attempt can never score the episode. The verifier contract is explicit
+  (`driver.py::parse_reward_output`): Harbor ignores the test script's exit status and lets the
+  reward file decide, and the admitted tasks were validated under that rule, so exit 0 and
+  exit 1 (ordinary test failure, pytest's code) are accepted together with a well-formed reward
+  in [0, 1]; any other exit status (a crashed, timed-out or incomplete verifier), a missing or
+  malformed reward file, or exit 1 reporting a full reward is a verifier failure: the episode is
+  dropped and never becomes a training sample. The research driver also ran an initial-state
+  check before the agent; the release's tasks have no such check and none is run.
 * **The proxy authenticates every endpoint** with `AES_PROXY_API_KEY` (only `/healthz` is
   open): the control surface can change the engine address, open the gates and read or delete
   recordings, and the research proxy only protected completions. The driver and the rollout's
@@ -243,9 +257,10 @@ What that means, made explicit in the release:
   previous rollout's manifest (`carry_manifest_<id>.json`: buffered groups and parked episode
   ids) and logs how many groups and episodes restart from turn 0. The buffer is empty, so no
   resume is attempted against a sandbox the process does not own.
-* **Orphaned sandboxes are removed** (Docker: by name prefix) before any new episode starts, so
-  they cannot hold admission slots or be mistaken for resumable work; the proxy's recordings of
-  a previous process are released as episodes are dropped.
+* **Orphaned sandboxes of a dead process are removed** before any new episode starts, so they
+  cannot hold admission slots or be mistaken for resumable work; the process must be dead (its
+  lease stale), so a concurrent process of the same run keeps its sandboxes. The proxy's
+  recordings of a previous process are released as episodes are dropped.
 * **Within a process**, a failing rollout fails closed: the gate is parked, running episodes
   are cancelled and every sandbox is released before the error propagates.
 

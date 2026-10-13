@@ -5,6 +5,8 @@ unchanged, verification reads the Harbor reward file, and the sandbox is release
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,7 +28,10 @@ class FakeSandbox:
         self.pi_done = asyncio.Event()
         self.pi_rc = 0
         self.reward_text = "0.75"          # what this run's test.sh writes; None writes nothing
+        self.verifier_rc = 0               # test.sh's exit status
         self.verifier_files = {}           # /logs/verifier as the container sees it
+        self.terminate_gate = None         # an Event that blocks terminate() until set
+        self.removed = False
 
     async def exec(self, *cmd, timeout_s=None, workdir=None, env=None):
         script = cmd[-1]
@@ -50,8 +55,8 @@ class FakeSandbox:
             if self.reward_text is not None:
                 self.verifier_files["reward.txt"] = self.reward_text
             if "reward.txt" in self.verifier_files:
-                return ExecResult(0, f"RC=0\nREWARD_TXT\n{self.verifier_files['reward.txt']}\n")
-            return ExecResult(0, "RC=1\nNO_REWARD\nno tests ran\n")
+                return ExecResult(0, f"RC={self.verifier_rc}\nREWARD_TXT\n{self.verifier_files['reward.txt']}\n")
+            return ExecResult(0, f"RC={self.verifier_rc}\nNO_REWARD\nno tests ran\n")
         if script == "true":
             return ExecResult(0)
         return ExecResult(1, "", f"unexpected: {script}")
@@ -69,24 +74,34 @@ class FakeSandbox:
         pass
 
     async def terminate(self):
+        if self.terminate_gate is not None:
+            await self.terminate_gate.wait()
         self.terminated += 1
+        self.removed = True
 
 
 class FakeBackend:
+    """Containers by name, with Docker's prefix removal semantics (`docker ps --filter name=^p`)."""
+
     name = "fake"
 
     def __init__(self):
         self.created = []
+        self.live = {}
         self.removed = []
 
     async def create(self, spec):
         sb = FakeSandbox(spec)
         self.created.append(sb)
+        self.live[spec.name] = sb
         return sb
 
     async def remove_by_prefix(self, prefix):
         self.removed.append(prefix)
-        return 2
+        victims = [name for name in self.live if name.startswith(prefix)]
+        for name in victims:
+            self.live.pop(name).removed = True
+        return len(victims)
 
 
 class FakeProxy:
@@ -118,7 +133,7 @@ def recording(n_prompt=4, n_gen=6, turns=2):
             "weight_versions": [3, 4]}
 
 
-def make_driver(tmp_path, rec=None, **overrides):
+def make_driver(tmp_path, rec=None, backend=None, **overrides):
     values = {"max_live_sandboxes": 4, "max_concurrent_episodes": 2, "carry_allowance": 2,
               "proxy_public_url": "https://proxy.example", "episode_timeout_s": 60, "run_id": "run1",
               "pi_version": "0.80.6", "sandbox_backend": "fake", "sandbox_cpu": 2, "sandbox_memory_gib": 8,
@@ -127,7 +142,7 @@ def make_driver(tmp_path, rec=None, **overrides):
     settings = CarrySettings(**values)
     args = SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=30001, rollout_max_context_len=1000,
                            rollout_max_response_len=100, hf_checkpoint=None)
-    backend = FakeBackend()
+    backend = backend or FakeBackend()
     proxy = FakeProxy(rec or recording())
     driver = dr.SandboxEpisodeDriver(settings, args, backend=backend, proxy=proxy)
     return driver, backend, proxy
@@ -149,14 +164,15 @@ async def test_full_episode_installs_pi_runs_once_verifies_and_releases(tmp_path
     s = sample(tmp_path)
     sb = await driver.create_sandbox(s)
     fake = backend.created[0]
-    assert fake.spec.image == "ghcr.io/example/task:1" and fake.spec.name == f"run1-{sb.episode_id}"
+    assert fake.spec.image == "ghcr.io/example/task:1"
+    assert fake.spec.name == f"run1-{driver.instance_id}-{sb.episode_id}" == driver.sandbox_name(sb.episode_id)
     assert proxy.configured == [("http://10.0.0.1:30001", "policy", 128, 1000)]
     install = next(c[0][-1] for c in fake.calls if "npm install" in c[0][-1])
     assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.6" in install   # Harbor's package
     assert f"/v1/ep/{sb.episode_id}" in fake.files[f"{dr.PI_CONFIG_DIR}/models.json"].decode()   # per-episode route
     assert fake.spec.cpu == 2 and fake.spec.memory_gib == 8 and fake.spec.workdir == "/app"
     assert "proxy.example" in fake.spec.domain_allowlist and "registry.npmjs.org" in fake.spec.domain_allowlist
-    assert driver.pending_cleanup_count() == 1
+    assert driver.live_count() == 1 and driver.pending_cleanup_count() == 0   # active, not closing
 
     run = asyncio.create_task(driver.run_turns(sample=s, sandbox=sb, turn_state=None, sampling_params={},
                                                should_abort=lambda: False, start_turn_index=0))
@@ -238,9 +254,125 @@ async def test_failed_pi_and_missing_recording_are_failures_not_rewards(tmp_path
         await driver.create_sandbox(SimpleNamespace(metadata={}, prompt=""))
 
 
-async def test_reap_orphans_and_setup_failure_release_the_slot(tmp_path):
+# ---- issue 1: capacity accounting -------------------------------------------------------------------------
+async def test_capacity_counts_active_and_closing_sandboxes_once(tmp_path):
+    """Capacity 6, four active episodes, nothing closing: the loop's deficit must be +2, and a
+    sandbox in cleanup is held exactly once until the backend confirms its deletion."""
+    driver, backend, _proxy = make_driver(tmp_path, max_live_sandboxes=6, max_concurrent_episodes=6,
+                                          carry_allowance=6)
+    boxes = [await driver.create_sandbox(sample(tmp_path, with_tests=i == 0)) for i in range(4)]
+    assert driver.live_count() == 4 and driver.pending_cleanup_count() == 0
+    inflight = 4                                                     # what the rollout counts
+    assert 6 - inflight - driver.pending_cleanup_count() == 2         # not -2
+    gate = asyncio.Event()
+    for fake in backend.created[:2]:
+        fake.terminate_gate = gate
+    boxes[0].close()
+    boxes[1].close()
+    await asyncio.sleep(0.02)
+    inflight = 2                                                     # their episodes have ended
+    assert driver.pending_cleanup_count() == 2 and driver.live_count() == 4
+    assert 6 - inflight - driver.pending_cleanup_count() == 2         # two free slots, no more
+    extra = [await driver.create_sandbox(sample(tmp_path, with_tests=False)) for _ in range(2)]
+    assert driver.live_count() == 6 and driver._live._value == 0      # at capacity, not beyond
+    gate.set()
+    await driver.wait_cleanup(2)
+    assert driver.pending_cleanup_count() == 0 and driver.live_count() == 4 and driver._live._value == 2
+    for sb in boxes[2:] + extra:
+        sb.close()
+    await driver.close_all(2)
+    assert driver.live_count() == 0 and driver._live._value == 6
+
+
+# ---- issue 2: run identity and orphan removal --------------------------------------------------------------
+def _age_lease(driver, seconds):
+    path = driver.lease.path()
+    record = json.loads(path.read_text())
+    record["heartbeat"] = time.time() - seconds
+    path.write_text(json.dumps(record))
+
+
+async def test_concurrent_jobs_never_remove_each_other_s_sandboxes(tmp_path):
+    """Two live processes of the same run (shared state dir) and a job of another run: a reap
+    from any of them removes nothing that is still owned by a live process."""
+    backend = FakeBackend()
+    state = str(tmp_path / "state")
+    job_a, _, _ = make_driver(tmp_path, backend=backend, state_dir=state)
+    job_b, _, _ = make_driver(tmp_path, backend=backend, state_dir=state)
+    other, _, _ = make_driver(tmp_path, backend=backend, state_dir=state, run_id="run2")
+    for job in (job_a, job_b, other):
+        job.lease.write()
+    a_box = await job_a.create_sandbox(sample(tmp_path))
+    o_box = await other.create_sandbox(sample(tmp_path, with_tests=False))
+    assert job_a.instance_id != job_b.instance_id
+    assert await job_b.reap_orphans() == 0 and await other.reap_orphans() == 0
+    assert set(backend.live) == {job_a.sandbox_name(a_box.episode_id), other.sandbox_name(o_box.episode_id)}
+    assert not backend.removed                                        # no rm -f was even issued
+    assert job_a.lease.path().exists() and other.lease.path().exists()
+
+
+async def test_crashed_instance_is_reaped_and_unknown_sandboxes_are_left_alone(tmp_path):
+    backend = FakeBackend()
+    state = str(tmp_path / "state")
+    crashed, _, _ = make_driver(tmp_path, backend=backend, state_dir=state)
+    crashed.lease.write()
+    dead_box = await crashed.create_sandbox(sample(tmp_path))
+    _age_lease(crashed, seconds=5000)                                  # no heartbeat for a long time
+    backend.live["run1-unknown-ep-x"] = FakeSandbox(SimpleNamespace(name="run1-unknown-ep-x"))
+    successor, _, _ = make_driver(tmp_path, backend=backend, state_dir=state)
+    successor.lease.write()
+    mine = await successor.create_sandbox(sample(tmp_path, with_tests=False))
+    assert await successor.reap_orphans() == 1
+    assert crashed.sandbox_name(dead_box.episode_id) not in backend.live
+    assert successor.sandbox_name(mine.episode_id) in backend.live       # the reaper's own survive
+    assert "run1-unknown-ep-x" in backend.live                           # no lease: not attributable
+    assert not crashed.lease.path().exists() and successor.lease.path().exists()
+    assert await successor.reap_orphans() == 0                           # idempotent
+    # a live instance's heartbeat protects it even when its lease is older than the stale bound
+    live, _, _ = make_driver(tmp_path, backend=backend, state_dir=state, lease_stale_s=10)
+    live.lease.write()
+    _age_lease(live, seconds=5)
+    assert await successor.reap_orphans() == 0
+
+
+async def test_without_a_state_dir_nothing_is_reaped(tmp_path):
+    backend = FakeBackend()
+    job_a, _, _ = make_driver(tmp_path, backend=backend)
+    await job_a.create_sandbox(sample(tmp_path))
+    job_b, _, _ = make_driver(tmp_path, backend=backend)
+    assert await job_b.reap_orphans() == 0 and len(backend.live) == 1 and not backend.removed
+
+
+# ---- issue 3: the verifier contract -------------------------------------------------------------------------
+@pytest.mark.parametrize("rc, reward_text, expected", [
+    (0, "1", 1.0),                       # ordinary success
+    (0, "0", 0.0),                       # ordinary failure reported with exit 0
+    (1, "0.25", 0.25),                   # ordinary failure: pytest's exit 1 with a partial reward
+    (1, "1", "contradiction"),           # tests failed but a full reward: refused
+    (2, "1", "status 2"),                # fresh reward.txt=1 then a crash: refused
+    (124, "0.5", "status 124"),          # timeout
+    (127, "1", "status 127"),            # command not found
+    (0, None, "no reward file"),         # missing output
+    (0, "abc", "malformed"),             # malformed output
+    (0, "1.5", "not a fraction"),        # out of range
+])
+async def test_verifier_contract_through_the_driver(tmp_path, rc, reward_text, expected):
     driver, backend, _proxy = make_driver(tmp_path)
-    assert await driver.reap_orphans() == 2 and backend.removed == ["run1-"]
+    s = sample(tmp_path)
+    sb = await driver.create_sandbox(s)
+    fake = backend.created[0]
+    fake.verifier_rc, fake.reward_text = rc, reward_text
+    if isinstance(expected, float):
+        assert await driver.verify(sample=s, sandbox=sb, turn_state=None) == expected
+    else:
+        with pytest.raises(dr.VerifierFailed, match=expected):
+            await driver.verify(sample=s, sandbox=sb, turn_state=None)
+    await driver.wait_cleanup(2)
+    assert fake.terminated == 1                                          # released either way
+
+
+async def test_setup_failure_releases_the_slot(tmp_path):
+    driver, backend, _proxy = make_driver(tmp_path)
 
     class BrokenInstall(FakeSandbox):
         async def exec(self, *cmd, timeout_s=None, workdir=None, env=None):
@@ -308,7 +440,11 @@ def test_apply_recording_and_reward_parsing():
     assert dr.parse_reward_output("RC=1\nREWARD_JSON\n{\"t1\": 1, \"t2\": 0}\n") == 0.5
     with pytest.raises(RuntimeError, match="no reward"):
         dr.parse_reward_output("RC=1\nNO_REWARD\nImportError: pytest\n")
-    with pytest.raises(RuntimeError, match="no reward marker"):
+    with pytest.raises(RuntimeError, match="no status or reward marker"):
         dr.parse_reward_output("RC=0\n1\n")                    # a bare number is not this run's file
+    with pytest.raises(dr.VerifierFailed, match="status 3"):
+        dr.parse_reward_output("RC=3\nREWARD_TXT\n1\n")
+    with pytest.raises(dr.VerifierFailed, match="malformed"):
+        dr.parse_reward_output("RC=0\nREWARD_JSON\n[1]\n")
     with pytest.raises(RuntimeError):
         dr.parse_reward_output("RC=0\nREWARD_TXT\nnan\n")

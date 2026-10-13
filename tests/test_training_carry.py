@@ -23,15 +23,18 @@ N = 2   # samples per prompt in these tests
 
 # ---- fakes -----------------------------------------------------------------------------------------
 class FakeSandbox:
-    def __init__(self, name):
+    def __init__(self, name, on_close=None):
         self.name = name
         self.closed = 0
         self.paused = 0
         self.resumed = 0
         self.alive = True
+        self.on_close = on_close
 
     def close(self):
         self.closed += 1
+        if self.on_close is not None:
+            self.on_close(self)
 
     def pause_execution(self):
         self.paused += 1
@@ -65,10 +68,17 @@ class FakeDriver:
         self.sandboxes: dict[str, FakeSandbox] = {}
         self.created = 0
         self.fail = set()
+        self.closing: set = set()          # sandboxes whose deletion is not yet confirmed
+        self.close_delay_s = 0.0
+
+    def _closing_hook(self, sb):
+        if self.close_delay_s > 0:
+            self.closing.add(sb)
+            asyncio.get_running_loop().call_later(self.close_delay_s, self.closing.discard, sb)
 
     async def create_sandbox(self, s):
         self.created += 1
-        sb = FakeSandbox(f"sb-{ep.episode_id(s)}-{self.created}")
+        sb = FakeSandbox(f"sb-{ep.episode_id(s)}-{self.created}", on_close=self._closing_hook)
         self.sandboxes[ep.episode_id(s)] = sb
         return sb
 
@@ -538,6 +548,55 @@ async def test_abort_drain_cancels_stragglers_and_their_sandboxes_are_released(r
     assert len(result.data) == 1 and result.aborted == [] and not state.pendings
     assert all(sb.closed == 1 for sb in driver.sandboxes.values())    # cancelled episodes release
     registry.assert_no_leaks()
+
+
+async def test_admission_refills_free_slots_counting_closing_sandboxes_once(registry):
+    """Capacity 6 with four active (slow) episodes: exactly the two free slots are refilled, a
+    finished group's sandboxes hold capacity only while their deletion is unconfirmed, and the
+    total of in-flight episodes plus closing sandboxes never exceeds the capacity."""
+    rewards = {g: [1.0, 0.0] for g in range(6)}
+    per_episode = {f"group-{g}-r{N * g + i}": rewards[g][i] for g in rewards for i in range(N)}
+    source = FakeSource(rewards)
+    driver = FakeDriver(slow=["group-0-r0", "group-0-r1", "group-1-r2", "group-1-r3"], rewards=per_episode)
+    driver.close_delay_s = 0.03
+    state = ro.RolloutState()
+    version = lc.CLOCK.begin(0)
+    hooks = ro.CarryHooks(RULES, registry=registry, gate=FakeGate(), held=lambda: len(driver.closing))
+    cfg = ro.LoopConfig(rollout_batch_size=2, n_samples_per_prompt=N, over_sampling_batch_size=2,
+                        max_concurrent_episodes=6, abort_drain_timeout_s=2, wait_timeout_s=0.005)
+    run_group = make_run_group(driver, registry, state, version=version, rollout_id=0)
+    peak = [0]
+    refilled = []
+
+    async def watch():
+        while not state.aborted:
+            total = state.inflight_samples + len(driver.closing)
+            peak[0] = max(peak[0], total)
+            await asyncio.sleep(0.001)
+
+    watcher = asyncio.create_task(watch())
+    result = await ro.collect_batch(cfg, data_source=source.get_samples, run_group=run_group,
+                                    dynamic_filter=zero_std, hooks=hooks, state=state, rollout_id=0)
+    watcher.cancel()
+    refilled = [g[0].group_index for g in result.data]
+    assert peak[0] <= 6, f"capacity exceeded: {peak[0]}"
+    assert peak[0] == 6                                                # the two free slots were used
+    assert refilled == [2, 3] and source.drawn == 4                    # one fresh group at a time
+    assert len(registry) == 4                                          # the slow groups parked
+    registry.drain()
+
+
+def test_run_identity_defaults_to_the_save_directory(tmp_path):
+    a = ro.resolve_identity(ro.CarrySettings(), str(tmp_path / "ckpt-a"))
+    again = ro.resolve_identity(ro.CarrySettings(), str(tmp_path / "ckpt-a"))
+    b = ro.resolve_identity(ro.CarrySettings(), str(tmp_path / "ckpt-b"))
+    assert a.run_id == again.run_id and a.run_id.startswith("aes-ckpt-a-")      # stable across restarts
+    assert a.run_id != b.run_id                                                 # distinct jobs
+    assert a.state_dir == str((tmp_path / "ckpt-a").resolve() / "carry")
+    explicit = ro.resolve_identity(ro.CarrySettings(run_id="mine", state_dir="/s"), str(tmp_path / "x"))
+    assert (explicit.run_id, explicit.state_dir) == ("mine", "/s")
+    with pytest.raises(RuntimeError, match="AES_CARRY_RUN_ID"):
+        ro.resolve_identity(ro.CarrySettings(), "")
 
 
 async def test_cut_bounds_the_initial_abort_request(registry):

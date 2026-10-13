@@ -154,6 +154,36 @@ def test_spec_domain_allowlist_overrides_the_backend_default(fake):
     assert kwargs["outbound_domain_allowlist"] == ["a.b"]
 
 
+async def test_remove_by_prefix_terminates_only_tagged_sandboxes_of_that_prefix(fake):
+    class Op:
+        def __init__(self, fn):
+            self.aio = fn
+
+    class ListedSandbox:
+        def __init__(self, name):
+            self.name = name
+            self.terminated = False
+            self.get_tags = Op(self._tags)
+            self.terminate = Op(self._terminate)
+
+        async def _tags(self):
+            return {"aes.name": self.name}
+
+        async def _terminate(self):
+            self.terminated = True
+
+    listed = [ListedSandbox("run-a-inst1-ep1"), ListedSandbox("run-a-inst2-ep2"), ListedSandbox("run-b-inst1-ep3")]
+
+    async def listing(app_id=None, **kwargs):
+        for sb in listed:
+            yield sb
+
+    fake.Sandbox.list = Op(listing)
+    backend = ModalBackend(modal_module=fake)
+    assert await backend.remove_by_prefix("run-a-inst1-") == 1
+    assert [sb.terminated for sb in listed] == [True, False, False]
+
+
 def test_blocked_hosts_script_is_idempotent_and_validated(tmp_path):
     hosts = tmp_path / "hosts"
     hosts.write_text("")

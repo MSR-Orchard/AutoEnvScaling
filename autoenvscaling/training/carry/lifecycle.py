@@ -388,6 +388,7 @@ class Heartbeat:
     registry: EpisodeRegistry
     interval_s: float
     episode_timeout_s: float
+    on_sweep: Callable[[], None] | None = None     # e.g. refresh the process's liveness lease
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
 
@@ -401,6 +402,8 @@ class Heartbeat:
     def _loop(self) -> None:
         while not self._stop.wait(self.interval_s):
             try:
+                if self.on_sweep is not None:
+                    self.on_sweep()
                 self.registry.evict_timed_out(self.episode_timeout_s)
                 self.registry.heartbeat_all()
             except Exception as exc:  # noqa: BLE001 - upkeep must never kill the thread
