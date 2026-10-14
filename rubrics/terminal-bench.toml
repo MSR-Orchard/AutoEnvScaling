@@ -9,11 +9,12 @@
 # Modification: the `binary_reward` criterion (the last criterion upstream) is removed, because
 # AutoEnvScaling tests give partial credit (reward = fraction of tests passed). In
 # `task_toml_schema`, the field lists add Harbor's `network_mode` and `allowed_hosts`
-# ([environment], [agent], [verifier]) and mark `allow_internet` as their deprecated alias: the
-# upstream list predates them, so a task using Harbor's current network field was failed as having
-# an invented field (Harbor 0.23, harbor.models.task.config). Every other criterion is copied
-# unchanged. At run time the host also drops any criterion listed in
-# ValidationSettings.rubric_skip, so the file can be swapped for the unmodified upstream copy.
+# ([environment], [agent], [verifier]), marking `allow_internet` as their deprecated alias, and
+# Harbor's `os` ([environment]): the upstream list predates them, so a task using one of these
+# current Harbor fields was failed as having an invented field (Harbor 0.23,
+# harbor.models.task.config). Every other criterion is copied unchanged. At run time the host
+# also drops any criterion listed in ValidationSettings.rubric_skip, so the file can be swapped
+# for the unmodified upstream copy.
 
 [[criteria]]
 name = "verifiable"
@@ -403,7 +404,7 @@ Valid sections and their fields (defined by the Harbor library):
 - network_mode, allowed_hosts (network override while the agent runs)
 
 [environment]:
-- build_timeout_sec, docker_image, cpus, memory_mb, storage_mb, gpus, gpu_types
+- build_timeout_sec, docker_image, os ("linux" or "windows"), cpus, memory_mb, storage_mb, gpus, gpu_types
 - network_mode ("public", "no-network" or "allowlist"), allowed_hosts (with "allowlist")
 - allow_internet (deprecated alias of network_mode: true = "public", false = "no-network")
 - env, skills_dir, mcp_servers
