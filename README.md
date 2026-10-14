@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://msr-orchard.github.io/AutoEnvScaling/"><b>🌐 Project Page</b></a> &nbsp;|&nbsp;
-  <b>📄 Paper</b> (arXiv link coming soon) &nbsp;|&nbsp;
+  <a href="https://arxiv.org/abs/2610.14163"><b>📄 Paper</b></a> &nbsp;|&nbsp;
   <a href="docs/experiments.md"><b>🧪 Reproducing the paper</b></a>
 </p>
 
@@ -134,12 +134,14 @@ tests/            unit tests (live tests need credentials: AES_LIVE_TESTS=1)
 ## Citation
 
 ```bibtex
-@misc{yu2026autoenvscaling,
-  title={{AutoEnvScaling}: Automating the Data Flywheel with Terminal Agents},
+@misc{yu2026autoenvscalingautomatingdataflywheel,
+  title={AutoEnvScaling: Automating the Data Flywheel with Terminal Agents},
   author={Simon Yu and Baolin Peng and Bo Liu and Zhengyan Shi and Zhaoyang Wang and Hao Cheng and Qianhui Wu and Wenlin Yao and Natasha Jaques and Weiyan Shi and Jianfeng Gao},
   year={2026},
-  note={Preprint},
-  url={https://auto-env-scaling.github.io}
+  eprint={2610.14163},
+  archivePrefix={arXiv},
+  primaryClass={cs.SE},
+  url={https://arxiv.org/abs/2610.14163},
 }
 ```
 
