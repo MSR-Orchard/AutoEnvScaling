@@ -14,7 +14,8 @@
 # current Harbor fields was failed as having an invented field (Harbor 0.23,
 # harbor.models.task.config). `[metadata]` is treated as free-form, as Harbor does, instead of
 # being limited to Terminal-Bench's contributor fields (whose criteria rubric_skip already drops);
-# Harbor's create-task skill has the proposer write `difficulty` there. Every other criterion is
+# Harbor's create-task skill has the proposer write `difficulty` there. The same criterion lists
+# Harbor's [task] package fields (name, version, description, authors, keywords). Every other criterion is
 # copied unchanged. At run time the host also drops any criterion listed in
 # ValidationSettings.rubric_skip, so the file can be swapped for the unmodified upstream copy.
 
@@ -384,11 +385,15 @@ PASS if the estimate is provided, non-zero, and plausible given the task descrip
 name = "task_toml_schema"
 description = "task.toml contains only valid fields — no extra or invented fields in any section"
 guidance = """
-task.toml must contain only fields recognized by Harbor. Extra fields are silently ignored, clutter the task definition, and create the false impression that they serve a purpose.
+Runtime configuration in task.toml must contain only fields recognized by Harbor. Extra fields in typed configuration sections may be silently ignored and create the false impression that they configure behavior. [metadata] is a free-form descriptive mapping, not a typed runtime configuration section.
 
 Valid sections and their fields (defined by the Harbor library):
 
 [metadata] — free-form: Harbor keeps every key in this table, so no [metadata] field counts as invented (e.g. difficulty, category, tags, author_name and the *_explanation fields are all acceptable).
+
+[task] — package information:
+- name, version, description, authors, keywords
+- name uses Harbor's org/name format; authors is a list of tables with name and optional email.
 
 [verifier]:
 - timeout_sec, env, user, environment_mode
