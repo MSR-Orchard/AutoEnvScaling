@@ -89,6 +89,26 @@ def test_aes_validate_end_to_end_with_a_fake_harbor(tmp_path, monkeypatch, capsy
     assert tool.main([str(tmp_path / "nope")]) == 2
 
 
+def test_aes_validate_report_stays_out_of_the_task(tmp_path, monkeypatch):
+    tool = load_tool("aes-validate")
+    task = make_task(tmp_path / "task")
+
+    def fake_run(cmd, capture_output, text, timeout, check):
+        jobs, name = Path(cmd[cmd.index("-o") + 1]), cmd[cmd.index("--job-name") + 1]
+        write_job(jobs / name, 1.0 if cmd[cmd.index("-a") + 1] == "oracle" else 0.0, "")
+
+        class P:
+            returncode, stdout, stderr = 0, "", ""
+        return P()
+
+    monkeypatch.setattr(tool.subprocess, "run", fake_run)
+    monkeypatch.setenv("AES_LOGS_DIR", str(tmp_path / "workspace-logs"))
+    monkeypatch.chdir(task)  # the proposer often runs it from inside the task
+    assert tool.main([".", "--jobs-dir", str(tmp_path / "jobs")]) == 0
+    assert not (task / "logs").exists()
+    assert len(list((tmp_path / "workspace-logs" / "aes-validate").glob("task-*.json"))) == 1
+
+
 # ---- web tools ----------------------------------------------------------------------------
 
 def test_web_search_filters_blocked_results(monkeypatch):

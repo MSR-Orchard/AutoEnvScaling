@@ -263,6 +263,7 @@ class EpisodeRunner:
         s, lay = self.settings, self.layout
         return {
             "PATH": f"{lay.ws(ws.TOOLS)}:{lay.image_tools}:{lay.base_path}",
+            "AES_LOGS_DIR": lay.ws(ws.LOGS),
             "AES_BLOCKED_HOSTS": ",".join(self.blocked_hosts()),
             "AES_SANDBOX_HARBOR_ENV": s.sandbox.harbor_env,
             "AES_SANDBOX_SOLVER_CPU": str(s.sandbox.solver_cpu),

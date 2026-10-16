@@ -7,8 +7,15 @@
 # Terminal-Bench authors.
 #
 # Modification: the `binary_reward` criterion (the last criterion upstream) is removed, because
-# AutoEnvScaling tests give partial credit (reward = fraction of tests passed). Every other
-# criterion is copied unchanged. At run time the host also drops any criterion listed in
+# AutoEnvScaling tests give partial credit (reward = fraction of tests passed). In
+# `task_toml_schema`, the field lists add Harbor's `network_mode` and `allowed_hosts`
+# ([environment], [agent], [verifier]), marking `allow_internet` as their deprecated alias, and
+# Harbor's `os` ([environment]): the upstream list predates them, so a task using one of these
+# current Harbor fields was failed as having an invented field (Harbor 0.23,
+# harbor.models.task.config). `[metadata]` is treated as free-form, as Harbor does, instead of
+# being limited to Terminal-Bench's contributor fields (whose criteria rubric_skip already drops);
+# Harbor's create-task skill has the proposer write `difficulty` there. Every other criterion is
+# copied unchanged. At run time the host also drops any criterion listed in
 # ValidationSettings.rubric_skip, so the file can be swapped for the unmodified upstream copy.
 
 [[criteria]]
@@ -381,24 +388,23 @@ task.toml must contain only fields recognized by Harbor. Extra fields are silent
 
 Valid sections and their fields (defined by the Harbor library):
 
-[metadata] — free-form in Harbor, but this benchmark expects only these fields:
-- author_name, author_email, author_github, author_organization
-- difficulty_explanation, solution_explanation, verification_explanation
-- category, subcategory, tags, expert_time_estimate_hours
-- relevant_experience
-- referral (optional — email of the person who referred the contributor; see CONTRIBUTING.md)
+[metadata] — free-form: Harbor keeps every key in this table, so no [metadata] field counts as invented (e.g. difficulty, category, tags, author_name and the *_explanation fields are all acceptable).
 
 [verifier]:
 - timeout_sec, env, user, environment_mode
+- network_mode, allowed_hosts (network override while the verifier runs)
 - environment (subsection with the same fields as top-level [environment]; used in separate verifier mode to override resource limits)
 - collect (list of [[verifier.collect]] blocks, each running a command in a compose service after the agent phase to snapshot state for artifact collection; fields: command, service, timeout_sec, user)
 
 [agent]:
 - timeout_sec, user
+- network_mode, allowed_hosts (network override while the agent runs)
 
 [environment]:
-- build_timeout_sec, docker_image, cpus, memory_mb, storage_mb, gpus, gpu_types
-- allow_internet, env, skills_dir, mcp_servers
+- build_timeout_sec, docker_image, os ("linux" or "windows"), cpus, memory_mb, storage_mb, gpus, gpu_types
+- network_mode ("public", "no-network" or "allowlist"), allowed_hosts (with "allowlist")
+- allow_internet (deprecated alias of network_mode: true = "public", false = "no-network")
+- env, skills_dir, mcp_servers
 - healthcheck (subsection: command, interval_sec, timeout_sec, start_period_sec, start_interval_sec, retries)
 
 [solution]:
@@ -408,9 +414,9 @@ Root level:
 - schema_version, task, metadata, verifier, agent, environment, solution, source
 - artifacts (entries uploaded from a container into the verifier container in separate verifier mode). Each entry is either an absolute path string or a table with fields: source, destination, exclude, service.
 
-Do not add invented fields (e.g., "skills", "prerequisites", "estimated_difficulty", "notes") to any section.
+Do not add invented fields (e.g., "skills", "prerequisites", "estimated_difficulty", "notes") to any section other than [metadata].
 
-PASS if task.toml contains only valid fields in all sections. FAIL if any invented or extra fields are present."""
+PASS if every section other than [metadata] contains only valid fields. FAIL if any invented or extra field is present outside [metadata]."""
 
 [[criteria]]
 name = "no_extraneous_files"
