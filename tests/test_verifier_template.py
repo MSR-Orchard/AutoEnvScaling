@@ -72,6 +72,22 @@ def test_failed_checks_score_zero(tmp_path):
     assert (logs / "reward.txt").read_text() == "0.0000\n"
 
 
+@pytest.mark.parametrize("cases", [[True, False, True], [True, True, False]])
+def test_parameterized_cases_count_individually_for_reward_and_reports(tmp_path, cases):
+    source = ("import pytest\n"
+              f"@pytest.mark.parametrize('passes', {cases!r})\n"
+              "def test_parameterized(passes): assert passes\n"
+              "def test_other(): assert True\n")
+    result, logs = run_template(tmp_path, source)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (logs / "reward.txt").read_text() == "0.7500\n"
+    report = json.loads((logs / "ctrf.json").read_text())["results"]
+    assert report["summary"]["tests"] == 4
+    assert report["summary"]["passed"] == 3
+    assert report["summary"]["failed"] == 1
+    assert len({test["name"] for test in report["tests"]}) == 4
+
+
 @pytest.mark.skipif(sys.platform != "linux" or os.geteuid() != 0 or not shutil.which("setpriv"),
                     reason="requires real Linux privilege separation")
 def test_agent_cannot_forge_a_pass_in_the_full_grading_pipeline(tmp_path, tmp_path_factory):
