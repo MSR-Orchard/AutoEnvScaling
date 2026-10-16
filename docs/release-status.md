@@ -35,6 +35,10 @@ an author decision before the public release.
   `expert_time_estimate`, `category_and_tags`, `task_name`, the three `*_explanation_quality`
   criteria, `ctrf_reporting`, `separate_verifier_configured`) are skipped, as in the paper's runs
   (`ValidationSettings.rubric_skip`).
+* Schema compatibility: the shipped rubric follows Harbor's free-form `[metadata]` and valid
+  `[task]` package fields instead of the Terminal-Bench contributor-metadata whitelist. Current
+  network/OS fields remain recognized. Other active criteria, including verifier hygiene and
+  execution isolation, remain in effect.
 * Solver network during calibration: allowlist. Solver attempts reach only the endpoint's host
   and the hosts Pi installs from (`PI_INSTALL_HOSTS`), plus anything the task already allows;
   `AES_SOLVER_NETWORK=public` opens it.
