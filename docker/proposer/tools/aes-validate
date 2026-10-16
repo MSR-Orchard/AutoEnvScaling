@@ -13,8 +13,9 @@ Usage:
     aes-validate <task_dir> --only reference  # one check
     aes-validate <task_dir> --env docker      # another Harbor environment type
 
-Prints one line per check and the path of a JSON report (under logs/aes-validate/) that includes
-the tail of each trial's verifier output. Exit status: 0 every check passed, 1 a check failed,
+Prints one line per check and the path of a JSON report that includes the tail of each trial's
+verifier output. The report goes under $AES_LOGS_DIR/aes-validate/ (the workspace's logs/), not
+the current directory, so running the tool from inside a task does not leave it in the task. Exit status: 0 every check passed, 1 a check failed,
 2 usage error, 3 Harbor produced no reward (build or infrastructure failure; read the report).
 
 The child containers use the Harbor environment named by --env, AES_SANDBOX_HARBOR_ENV, or
@@ -172,7 +173,8 @@ def main(argv: list[str] | None = None) -> int:
 
     report = {"task_dir": str(task_dir), "env": args.env, "reference_min_reward": reference_min,
               "empty_max_reward": empty_max, "checks": results}
-    out = args.out or Path("logs") / "aes-validate" / f"{task_dir.name}-{int(time.time())}.json"
+    logs = Path(os.environ.get("AES_LOGS_DIR") or "logs")
+    out = args.out or logs / "aes-validate" / f"{task_dir.name}-{int(time.time())}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2))
 
