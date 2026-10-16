@@ -37,8 +37,9 @@ class ValidationSettings:
     heldout_dataset: str = "terminal-bench/terminal-bench-2-1,terminal-bench/terminal-bench@4.0.0"
     rubric: str = "terminal-bench"      # rubric used by `harbor check`
     # Criteria skipped in the rubric review, as in the paper's runs: binary_reward (our tests
-    # give partial credit) and the contributor-metadata criteria, which generated tasks do not
-    # carry (a README, time estimates, tags, explanations, CTRF reporting, a separate verifier).
+    # give partial credit) and the legacy contributor/reporting criteria. Keep this skip list
+    # stable; the authoring skill recommends a separate verifier to satisfy the still-active
+    # hygiene and execution-isolation criteria.
     rubric_skip: tuple[str, ...] = (
         "binary_reward",
         "task_readme", "expert_time_estimate", "category_and_tags", "task_name",

@@ -25,7 +25,7 @@ runs. For a private registry, create a Modal Secret with `REGISTRY_USERNAME` and
 | `/opt/node`, `/usr/local/bin/{node,npm,pi,codex,claude}` | Node.js and the harnesses |
 | Python `harbor[modal]`, `autoenvscaling` | Harbor CLI for child containers; the solver runner |
 | `/opt/aes/skills/create-task/` | Harbor's official skill, fetched at build time |
-| `/opt/aes/skills/auto_env_scaling/` | our overlay skill and the fraction-scoring verifier template |
+| `/opt/aes/skills/auto_env_scaling/` | our overlay skill, fraction-scoring verifier template and `run_agent.py` execution helper |
 | `/opt/aes/skills/harbor_domains/` | guidance for non-terminal domains |
 | `/opt/aes/tools/` | `aes-validate`, `solver_model`, `web_search`, `web_fetch` (see `tools/README.md`) |
 | `/workspace` | the working directory; the host uploads the workspace here |
