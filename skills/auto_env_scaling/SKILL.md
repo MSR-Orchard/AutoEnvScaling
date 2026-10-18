@@ -47,12 +47,84 @@ the solver's real decisions lead to different outcomes.
 
 The solver's reward is the fraction of tests that pass. `skills/auto_env_scaling/
 verifier_template.sh` is a `tests/test.sh` that runs `tests/test_outputs.py` with pytest and
-writes `tests passed / tests total` to `/logs/verifier/reward.txt`. To use it,
-`cp skills/auto_env_scaling/verifier_template.sh <task>/tests/test.sh` without editing it,
-install `pytest` and `pytest-json-ctrf` in the image, and write meaningful tests in
-`tests/test_outputs.py`. Tests should check real milestones so that genuine solver decisions
-create spread; do not write a low-bar checklist that gives every attempt the same partial
-credit.
+writes `tests passed / tests total` to `/logs/verifier/reward.txt`. Copy it to
+`<task>/tests/test.sh` as the trusted grading controller. It keeps grading files private,
+discards stale reports and fails without a reward on pytest collection or configuration errors.
+
+Use a **separate verifier**: set `[verifier].environment_mode = "separate"`, put test-only
+dependencies in `tests/Dockerfile`, and keep them out of `environment/Dockerfile`. For example:
+
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir pytest==8.4.1
+COPY . /tests/
+RUN mkdir -p /app
+```
+
+Declare only required agent-produced deliverables as **top-level** `artifacts` in `task.toml`,
+before any section headers. For example, `artifacts = ["/app/result.json"]` transfers that
+file into the separate verifier. Its parent directory must exist in the verifier image.
+Bake pristine inputs and expected answers into the verifier rather than transferring them
+from the agent. Use the `create-task` skill for artifact mappings and collect hooks.
+
+Write meaningful tests in `tests/test_outputs.py`. They should check real milestones so
+genuine solver decisions create spread; do not write a low-bar checklist giving every
+attempt the same partial credit.
+
+### Executing agent-produced code
+
+Parsing output data is different from executing it. A verifier that only parses JSON, CSV or
+other data files needs no agent-code subprocess. If tests run a submitted script or binary,
+or import a submitted Python module, isolate that execution from the trusted test runner:
+
+1. Copy `skills/auto_env_scaling/run_agent.py` to `<task>/tests/run_agent.py`.
+2. Keep pytest, expected answers and CTRF/JUnit reports trusted and root-owned. Do not import
+   agent modules into root pytest. Do not run all of pytest as the same user as the agent code:
+   that user could forge the report from which root derives the reward.
+3. Invoke the helper from trusted tests, for example:
+
+   ```python
+   import json
+   import subprocess
+
+   def test_submitted_cli():
+       process = subprocess.run(
+           ["python3", "-I", "/tests/run_agent.py", "--timeout", "20", "--",
+            "python3", "/app/submitted.py", "--example"],
+           capture_output=True, text=True, check=True, timeout=30,
+       )
+       result = json.loads(process.stdout)
+       assert not result["timed_out"] and result["returncode"] == 0
+       assert not result["output_truncated"]
+       assert result["stdout"].strip() == "expected output"
+   ```
+
+The helper requires root on Linux and `setpriv` from util-linux in the verifier image. It
+uses a fresh unprivileged identity per invocation, drops capabilities, enables no-new-privileges,
+bounds runtime/file output/process count, and kills and reaps detached descendants. Agent
+code receives a private scratch directory and a minimal environment, without host credentials.
+Use `--cwd /app` only if the program needs that working directory; ensure its inputs are
+readable by the unprivileged user. Do not make grading data readable to make the program work.
+
+By default the helper protects `/tests` and `/logs/verifier`. Put **all** expected answers
+and trusted test/controller files under protected directories. If trusted data must live
+elsewhere, repeat `--protect` for every protected directory, including `/tests` and
+`/logs/verifier` (the option replaces the defaults). A separate container and a protected
+reward file alone do not prevent agent code from forging a writable intermediate test report.
+The helper is privilege separation inside the verifier, not a replacement for its container,
+network policy or task-specific verification of outputs. Its runtime directory defaults to
+`$TMPDIR/aes-verifier` (or the system temporary directory); it and its ancestors must be
+traversable by the unprivileged user and outside protected directories. Use the same runtime
+directory for concurrent helper calls in one verifier so their identity reservations are shared.
+
+### Reference solution and configuration
+
+Keep substantive reference programs in their own files under `solution/`, with `solve.sh`
+copying/running them. Avoid large inline heredocs in `solve.sh` (roughly over 20 lines).
+Harbor preserves arbitrary descriptive `[metadata]` fields, including `difficulty`. Runtime
+settings such as timeouts belong in the corresponding typed configuration sections.
 
 ## What makes the environment useful
 
@@ -61,8 +133,8 @@ credit.
 - **A real skill gap**: multi-step terminal or software work with exact flags, paths, config and
   state to track. No trivia; nothing underspecified or unsolvable.
 - **Self-contained and deterministic**: no network at solve time (`network_mode =
-  "no-network"`), so install everything in the image. Never manufacture spread with randomness,
-  flaky timing, an underspecified instruction or nondeterministic tests.
+  "no-network"`), so install each phase's dependencies in its own image. Never manufacture
+  spread with randomness, flaky timing, an underspecified instruction or nondeterministic tests.
 - **Original**: do not copy benchmark tasks. The host flags any instruction that shares a
   13-gram with a held-out benchmark task.
 - **Consistent**: the host reviews the task against the Terminal-Bench rubric (`harbor check`),
@@ -77,6 +149,10 @@ aes-validate output/tasks/<name>
 # 2. Estimate difficulty with the current solver (aim for a mean in [0.25, 0.75] with spread):
 solver_model output/tasks/<name> -n 4
 ```
+
+`aes-validate` checks reference/empty execution, not the full rubric. Before spending solver
+rollouts, check the separate-verifier layout, declared artifacts, clean agent image, protected
+grading state, isolated agent-code execution and reference-solution packaging described above.
 
 If the reference solution does not reach 1.0, `solve.sh` and the verifier disagree: fix them and
 rerun. If the empty solution scores 0.5 or more, the verifier passes without real work: make it

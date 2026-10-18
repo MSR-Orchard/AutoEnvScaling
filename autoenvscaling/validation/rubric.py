@@ -6,9 +6,11 @@ criterion (``pass``, ``fail`` or ``not_applicable``, with an explanation). We ca
 path through Harbor's Python API (``harbor.analyze.checker.run_checks``), which returns the parsed
 report instead of printing it.
 
-Following the paper, the reviewer is the proposer's own model, and every criterion of the
-official Terminal-Bench task-implementation rubric applies except ``binary_reward`` (our tests give
-partial credit). A task passes the review only if no applied criterion is ``fail``.
+Following the paper, the reviewer is the proposer's own model. The shipped Terminal-Bench-derived
+rubric omits ``binary_reward`` (our tests give partial credit), and its schema guidance follows
+Harbor's current runtime/package fields and free-form metadata. Contributor criteria listed in
+``ValidationSettings.rubric_skip`` are filtered out. A task passes only if no applied criterion
+is ``fail``.
 
 The rubric setting accepts a name or a path. ``terminal-bench`` resolves to
 ``rubrics/terminal-bench.toml`` in this repository; ``harbor-default`` uses the rubric that ships

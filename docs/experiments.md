@@ -80,8 +80,12 @@ trials (`[sandbox] backend` and `harbor_env`).
 **Validation** (Section 3.2, Appendix G.4). The environment builds; the reference solution gets
 reward 1; an empty (do-nothing) solution gets less than 0.5; no instruction shares a 13-gram
 with a held-out task (Terminal-Bench 2.1 and 4.0, sliding window, stride 1); `harbor check`
-passes with the official Terminal-Bench rubric graded by the proposer's own model, except the
-`binary_reward` criterion because tests give partial credit.
+passes with the Terminal-Bench-derived rubric graded by the proposer's own model. The shipped
+rubric omits `binary_reward` because tests give partial credit; the configured
+`ValidationSettings.rubric_skip` removes contributor criteria. Its `task_toml_schema` guidance
+recognizes Harbor's current network/OS and package fields, and treats `[metadata]` as free-form
+descriptive data. These compatibility changes do not waive invalid runtime configuration or
+the active verifier hygiene and execution-isolation criteria.
 
 **Calibration** (Section 3.2, Appendix G.4). The current solver attempts the environment 4
 times, expanded to 8 when the mean is within 0.15 of a band edge. The environment is kept if the
