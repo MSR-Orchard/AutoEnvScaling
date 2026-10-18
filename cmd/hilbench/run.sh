@@ -24,7 +24,7 @@ print(upstream_server(Path(sys.argv[1])))' "${HIL_BENCH_ROOT:-<HiL-Bench checkou
 # 1. Authoring: the HiL prompt for episode i (domain hint i) ...
 aes hilbench prompt --index 0
 # ... run by Claude Opus 5 in Claude Code through the proposer pipeline.
-not_in_release "HiL task generation" "a HiL setting for the proposer pipeline (selfplay generate uses the standard authoring prompt)"
+not_in_release "HiL task generation" "a HiL setting for the proposer pipeline (aes generate uses the standard authoring prompt)"
 
 # 2. Derive the full_info, ask_human and baseline variants (string operations, no model call).
 if [[ -n "${HIL_TASKS:-}" || "$DRY_RUN" == "1" ]]; then

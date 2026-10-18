@@ -42,13 +42,13 @@ N_FRONTIER="$(num_rollout "$CONFIG" "$STEPS" frontier)"
 #    converted tasks in place; a second pool of the same tasks supplies parents to the proposers.
 aes tmax --zip "${TMAX_ZIP:-<tasks.zip>}" --out "$AES_RUN_DIR/tmax-tasks" ${SELECT[@]+"${SELECT[@]}"}
 for pool in tmax/pool parents; do
-  aes selfplay --config "$CONFIG" seed --pool-dir "$AES_RUN_DIR/$pool" --source tmax --no-copy \
+  aes seed --config "$CONFIG" --pool-dir "$AES_RUN_DIR/$pool" --source tmax --no-copy \
       "$AES_RUN_DIR"/tmax-tasks/*
 done
 
 # 2. Tmax: solver RL on the static pool (Miles in the background, the loop in the foreground).
 miles_start "$PRESET" "$AES_RUN_DIR/tmax" "$N_STATIC" "${WEIGHTS[@]}"
-aes selfplay --config "$CONFIG" run --mode static --pool-dir "$AES_RUN_DIR/tmax/pool" \
+aes run --config "$CONFIG" --mode static --pool-dir "$AES_RUN_DIR/tmax/pool" \
     --run-dir "$AES_RUN_DIR/tmax" --bridge-dir "$AES_RUN_DIR/tmax/bridge" --steps "$STEPS" \
     "${BRIDGE_ARGS[@]}"
 miles_wait
@@ -65,12 +65,12 @@ for proposer in "${PROPOSERS[@]}"; do
     ablate=()
     # Ablation: past solver trajectories removed from the proposer's workspace.
     if [[ "$variant" == "no-solver-feedback" ]]; then ablate=(--no-solver-feedback); fi
-    aes selfplay --config "$CONFIG" generate --parents-pool "$AES_RUN_DIR/parents" \
+    aes generate --config "$CONFIG" --parents-pool "$AES_RUN_DIR/parents" \
         --pool-dir "$dir/pool" --out-dir "$dir/initial" --harness "$harness" \
         --model "$proposer" --assignments "$INITIAL_ENVS" --round-id initial \
         ${ablate[@]+"${ablate[@]}"}
     miles_start "$PRESET" "$dir" "$N_FRONTIER" "${WEIGHTS[@]}"
-    aes selfplay --config "$CONFIG" run --mode frontier --pool-dir "$dir/pool" --run-dir "$dir" \
+    aes run --config "$CONFIG" --mode frontier --pool-dir "$dir/pool" --run-dir "$dir" \
         --bridge-dir "$dir/bridge" --steps "$STEPS" --harness "$harness" --model "$proposer" \
         "${BRIDGE_ARGS[@]}" ${ablate[@]+"${ablate[@]}"}
     miles_wait

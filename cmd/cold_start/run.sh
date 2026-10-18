@@ -27,10 +27,10 @@ require_env SEED_TASKS BASE_HF BASE_REF AES_SOLVER_BASE_URL AES_SOLVER_MODEL
 
 # 1. Proposer episodes from the teachers, each in its coding agent. Admitted episodes (r_P = 1)
 #    are the candidates for fine-tuning.
-aes selfplay --config "$CONFIG" seed --pool-dir "$AES_RUN_DIR/parents" --source seed --no-copy \
+aes seed --config "$CONFIG" --pool-dir "$AES_RUN_DIR/parents" --source seed --no-copy \
     "${SEEDS[@]}"
 for teacher in "${TEACHERS[@]}"; do
-  aes selfplay --config "$CONFIG" generate --parents-pool "$AES_RUN_DIR/parents" \
+  aes generate --config "$CONFIG" --parents-pool "$AES_RUN_DIR/parents" \
       --pool-dir "$AES_RUN_DIR/teachers/$teacher/pool" --out-dir "$AES_RUN_DIR/teachers/$teacher" \
       --harness "$(harness_for "$teacher")" --model "$teacher" --assignments "$N_EPISODES" \
       --round-id teacher
@@ -52,7 +52,7 @@ aes train run "${TRAIN[@]}"
 note "serve the base and Cold-Start checkpoints before step 3; set BASE_MODEL and COLD_START_MODEL"
 for model in "${BASE_MODEL:-<served base>}" "${COLD_START_MODEL:-<served cold-start>}"; do
   for suite in 60 136; do
-    aes selfplay --config "$CONFIG" generate --parents-pool "$AES_RUN_DIR/parents" \
+    aes generate --config "$CONFIG" --parents-pool "$AES_RUN_DIR/parents" \
         --pool-dir "$AES_RUN_DIR/eval$suite/$model/pool" --out-dir "$AES_RUN_DIR/eval$suite/$model" \
         --harness pi --model "$model" --assignments "$suite" --seed "$suite" \
         --round-id "eval$suite"

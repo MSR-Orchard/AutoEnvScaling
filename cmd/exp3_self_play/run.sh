@@ -41,9 +41,9 @@ N_STATIC="$(num_rollout "$CONFIG" "$STEPS" static)"
 
 # 1. Initial pool: one generation round by the Cold-Start policy in the Pi harness, parents from
 #    SEED_TASKS. Both self-play runs start from a copy of it.
-aes selfplay --config "$CONFIG" seed --pool-dir "$AES_RUN_DIR/parents" --source seed --no-copy \
+aes seed --config "$CONFIG" --pool-dir "$AES_RUN_DIR/parents" --source seed --no-copy \
     "${SEEDS[@]}"
-aes selfplay --config "$CONFIG" generate --parents-pool "$AES_RUN_DIR/parents" \
+aes generate --config "$CONFIG" --parents-pool "$AES_RUN_DIR/parents" \
     --pool-dir "$AES_RUN_DIR/initial/pool" --out-dir "$AES_RUN_DIR/initial" --harness pi \
     --model "$POLICY" --assignments "$INITIAL_ENVS" --round-id initial
 
@@ -58,16 +58,16 @@ for arm in autoenvscaling no-proposer-training; do
   if [[ "$arm" == "autoenvscaling" ]]; then n="$N_SHARED"; ablate=();
   else n="$N_NO_PROPOSER"; ablate=(--no-proposer-training); fi
   miles_start shared-policy "$dir" "$n" "${WEIGHTS[@]}"
-  aes selfplay --config "$CONFIG" run --mode shared --pool-dir "$dir/pool" --run-dir "$dir" \
+  aes run --config "$CONFIG" --mode shared --pool-dir "$dir/pool" --run-dir "$dir" \
       --bridge-dir "$dir/bridge" --steps "$STEPS" "${BRIDGE_ARGS[@]}" ${ablate[@]+"${ablate[@]}"}
   miles_wait
 done
 
 # 3. Tmax: solver RL on the static pool from the same checkpoint.
-aes selfplay --config "$CONFIG" seed --pool-dir "$AES_RUN_DIR/tmax/pool" --source tmax --no-copy \
+aes seed --config "$CONFIG" --pool-dir "$AES_RUN_DIR/tmax/pool" --source tmax --no-copy \
     "$TMAX_TASKS"/*
 miles_start shared-policy "$AES_RUN_DIR/tmax" "$N_STATIC" "${WEIGHTS[@]}"
-aes selfplay --config "$CONFIG" run --mode static --pool-dir "$AES_RUN_DIR/tmax/pool" \
+aes run --config "$CONFIG" --mode static --pool-dir "$AES_RUN_DIR/tmax/pool" \
     --run-dir "$AES_RUN_DIR/tmax" --bridge-dir "$AES_RUN_DIR/tmax/bridge" --steps "$STEPS" \
     "${BRIDGE_ARGS[@]}"
 miles_wait

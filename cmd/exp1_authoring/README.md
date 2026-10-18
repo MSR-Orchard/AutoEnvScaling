@@ -38,8 +38,8 @@ latest campaigns; the scored counts per cell are in `data/paper/fig_arms_data.js
 |---|---|
 | Prompt, Prompt + Env Feedback | `autoenvscaling baselines generate --arm prompt\|feedback --model M --assignments A --out D` |
 | Their valid rates and costs | `autoenvscaling baselines summarize --out D [--usd-per-mtok-in X --usd-per-mtok-out Y]` |
-| Parent pool for the harness arm | `autoenvscaling selfplay seed --pool-dir P --source seed --no-copy <tasks>` |
-| AutoEnvScaling | `autoenvscaling selfplay generate --parents-pool P --pool-dir D/pool --harness H --model M --assignments N` |
+| Parent pool for the harness arm | `aes seed --pool-dir P --source seed --no-copy <tasks>` |
+| AutoEnvScaling | `aes generate --parents-pool P --pool-dir D/pool --harness H --model M --assignments N` |
 | Tables and figures | `python analysis/make_all.py` |
 
 ## Differences from the paper's runs

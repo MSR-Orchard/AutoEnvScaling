@@ -13,8 +13,8 @@ from `data/paper/` by `python analysis/make_all.py` into `outputs/`; this needs 
 extras and never calls a model or starts a sandbox.
 
 Training runs pair a Miles job in bridge mode (`autoenvscaling train run --preset ...`) with the
-self-play loop (`autoenvscaling selfplay run ...`), which runs every solver and proposer episode
-and hands Miles finished RL groups through a shared bridge directory. `autoenvscaling selfplay
+self-play loop (`aes run ...`), which runs every solver and proposer episode
+and hands Miles finished RL groups through a shared bridge directory. `aes
 schedule` gives the number of Miles updates (`--num-rollout`) for a run.
 
 Status legend: **from data** means the item renders from the released numbers; **runs** means

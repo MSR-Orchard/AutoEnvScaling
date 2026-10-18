@@ -30,7 +30,7 @@ DRY_RUN=1 cmd/cross_domain/run.sh
 
 ## What runs
 
-- **Terminal domain**: `autoenvscaling selfplay generate --harness codex|claude-code --model M`
+- **Terminal domain**: `aes generate --harness codex|claude-code --model M`
   from `SEED_TASKS` parents. Admission is the standard pipeline's (empty solution below 0.5
   rather than exactly zero, no reset check, plus contamination, rubric review and calibration),
   so it is stricter in some checks and looser in others than the appendix protocol.

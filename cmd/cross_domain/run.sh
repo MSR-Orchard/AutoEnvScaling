@@ -20,10 +20,10 @@ start_log cross_domain
 require_env SEED_TASKS AES_SOLVER_BASE_URL AES_SOLVER_MODEL
 
 # Terminal: the standard pipeline, up to two revisions after the initial attempt.
-aes selfplay --config "$CONFIG" seed --pool-dir "$AES_RUN_DIR/parents" --source seed --no-copy \
+aes seed --config "$CONFIG" --pool-dir "$AES_RUN_DIR/parents" --source seed --no-copy \
     "${SEEDS[@]}"
 for proposer in "${PROPOSERS[@]}"; do
-  aes selfplay --config "$CONFIG" generate --parents-pool "$AES_RUN_DIR/parents" \
+  aes generate --config "$CONFIG" --parents-pool "$AES_RUN_DIR/parents" \
       --pool-dir "$AES_RUN_DIR/terminal/$proposer/pool" --out-dir "$AES_RUN_DIR/terminal/$proposer" \
       --harness "$(harness_for "$proposer")" --model "$proposer" --assignments "${N_TASKS:-75}" \
       --round-id terminal
