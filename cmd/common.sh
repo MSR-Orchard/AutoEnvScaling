@@ -58,7 +58,7 @@ require_env() {  # require_env VAR...: fail early instead of producing a wall of
 }
 
 num_rollout() {  # num_rollout <config> <steps> <schedule mode>: Miles --num-rollout for a loop
-  "${AES_CLI[@]}" selfplay --config "$1" schedule --steps "$2" --mode "$3" \
+  "${AES_CLI[@]}" schedule --config "$1" --steps "$2" --mode "$3" \
     | sed -n 's/.*--num-rollout): *//p'
 }
 

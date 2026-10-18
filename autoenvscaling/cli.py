@@ -1,7 +1,12 @@
-"""`autoenvscaling <command> ...`: one entry point for every part of the pipeline.
+"""`aes <command> ...` (or `autoenvscaling <command> ...`): one entry point for every part of the pipeline.
 
     admit       validate (and optionally calibrate) one Harbor task directory
-    selfplay    pool seeding, generation rounds, and the self-play loop
+    seed        admit existing Harbor tasks into a pool          (= selfplay seed)
+    generate    one generation round with a fixed-weight proposer (= selfplay generate)
+    prompts     write the active pool as Miles prompt rows        (= selfplay prompts)
+    schedule    print the training schedule                       (= selfplay schedule)
+    run         run the self-play training loop                   (= selfplay run)
+    selfplay    the same five steps under one command group
     train       plan or launch Miles training jobs
     export      proposer/solver trajectories to SFT rows or RL groups
     baselines   Prompt and Prompt + Env Feedback generation arms
@@ -32,6 +37,30 @@ COMMANDS = {
     "hilbench": "autoenvscaling.evals.hilbench.__main__",
     "solver": "autoenvscaling.proposer.solver_tool",
 }
+
+
+# The self-play steps are also top-level commands, so `aes generate ...` works without the
+# `selfplay` group name. `selfplay` takes --config before its subcommand; _selfplay_argv moves a
+# --config given after the step name into that position.
+SELFPLAY_STEPS = ("seed", "generate", "prompts", "schedule", "run")
+
+
+def _selfplay_argv(step: str, rest: list[str]) -> list[str]:
+    config: list[str] = []
+    others: list[str] = []
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--config" and i + 1 < len(rest):
+            config = ["--config", rest[i + 1]]
+            i += 2
+            continue
+        if arg.startswith("--config="):
+            config = [arg]
+        else:
+            others.append(arg)
+        i += 1
+    return [*config, step, *others]
 
 
 def admit_main(argv: list[str]) -> int:
@@ -79,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     command, rest = argv[0], argv[1:]
     if command == "admit":
         return admit_main(rest)
+    if command in SELFPLAY_STEPS:
+        selfplay = importlib.import_module(COMMANDS["selfplay"])
+        return selfplay.main(_selfplay_argv(command, rest)) or 0
     if command not in COMMANDS:
         print(f"unknown command {command!r}\n{__doc__}", file=sys.stderr)
         return 2

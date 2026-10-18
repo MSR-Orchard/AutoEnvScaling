@@ -48,10 +48,10 @@ done
 #    validates each submitted task (and calibrates valid ones); the round summary reports
 #    valid_rate, and every episode's checks are in proposer_trajectories.jsonl.
 if has harness; then
-  aes selfplay --config "$CONFIG" seed --pool-dir "$AES_RUN_DIR/parents" --source seed \
+  aes seed --config "$CONFIG" --pool-dir "$AES_RUN_DIR/parents" --source seed \
       --no-copy "${SEEDS[@]}"
   for model in "${MODELS[@]}"; do
-    aes selfplay --config "$CONFIG" generate --parents-pool "$AES_RUN_DIR/parents" \
+    aes generate --config "$CONFIG" --parents-pool "$AES_RUN_DIR/parents" \
         --pool-dir "$AES_RUN_DIR/harness/$model/pool" --out-dir "$AES_RUN_DIR/harness/$model" \
         --harness "$(harness_for "$model")" --model "$model" \
         --assignments "${N_HARNESS:-200}" --round-id "exp1-$model"

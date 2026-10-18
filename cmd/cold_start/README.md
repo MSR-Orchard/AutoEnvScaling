@@ -18,10 +18,10 @@ DRY_RUN=1 cmd/cold_start/run.sh
 
 | Step | Command |
 |---|---|
-| Teacher episodes | `autoenvscaling selfplay generate --parents-pool P --pool-dir Q --harness H --model <teacher> --assignments N` |
+| Teacher episodes | `aes generate --parents-pool P --pool-dir Q --harness H --model <teacher> --assignments N` |
 | Fine-tuning rows | `autoenvscaling export sft <round>/proposer_trajectories.jsonl ... --out sft.jsonl` |
 | Fine-tuning | `autoenvscaling train plan\|run --preset cold-start --prompt-data sft.jsonl --hf-checkpoint ... --ref-load ... --save ...` |
-| Generation before and after | `autoenvscaling selfplay generate --harness pi --model <served checkpoint> --assignments 60\|136 --seed S` |
+| Generation before and after | `aes generate --harness pi --model <served checkpoint> --assignments 60\|136 --seed S` |
 | Solving before and after | `cmd/evals/run.sh <served checkpoint> tb2.1` |
 
 `export sft` keeps admitted episodes (r_P = 1), one per task. The paper trained on every such

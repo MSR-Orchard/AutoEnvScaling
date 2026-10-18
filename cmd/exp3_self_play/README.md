@@ -28,11 +28,11 @@ DRY_RUN=1 cmd/exp3_self_play/run.sh
 
 | Step | Command |
 |---|---|
-| Parent pool | `autoenvscaling selfplay seed --pool-dir P --source seed --no-copy <tasks>` |
-| Initial pool | `autoenvscaling selfplay generate --parents-pool P --pool-dir Q --harness pi --model <policy> --assignments 256` |
-| Miles updates per run | `autoenvscaling selfplay schedule --steps 288 --mode shared` (305 updates: 288 solver + 17 proposer) |
+| Parent pool | `aes seed --pool-dir P --source seed --no-copy <tasks>` |
+| Initial pool | `aes generate --parents-pool P --pool-dir Q --harness pi --model <policy> --assignments 256` |
+| Miles updates per run | `aes schedule --steps 288 --mode shared` (305 updates: 288 solver + 17 proposer) |
 | Miles job | `autoenvscaling train plan\|run --preset shared-policy --bridge-dir B --hf-checkpoint ... --ref-load ... --save ... --num-rollout N` |
-| Training loop | `autoenvscaling selfplay run --mode shared\|static --pool-dir Q --run-dir R --bridge-dir B --steps 288 [--no-proposer-training]` |
+| Training loop | `aes run --mode shared\|static --pool-dir Q --run-dir R --bridge-dir B --steps 288 [--no-proposer-training]` |
 | Tmax tasks | `autoenvscaling tmax --zip tasks.zip --out pools/tmax15k` |
 | Evaluation | `cmd/evals/run.sh <served checkpoint> both` |
 

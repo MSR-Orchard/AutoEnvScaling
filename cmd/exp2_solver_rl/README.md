@@ -13,7 +13,7 @@ through its harness.
   removed from the proposer's workspace (`--no-solver-feedback`).
 
 Each run is a Miles job in bridge mode (`autoenvscaling train run --preset exp2-<solver>`) fed by
-the self-play loop (`autoenvscaling selfplay run`) through a shared bridge directory; the
+the self-play loop (`aes run`) through a shared bridge directory; the
 launcher starts the Miles job in the background and the loop in the foreground. Evaluation:
 held-out Terminal-Bench 2.1, avg@5, at matched training steps (`cmd/evals`).
 
@@ -30,11 +30,11 @@ DRY_RUN=1 cmd/exp2_solver_rl/run.sh qwen3.5-35b-a3b
 | Step | Command |
 |---|---|
 | Tmax tasks from TMax-15K | `autoenvscaling tmax --zip tasks.zip --out D [--select S]` |
-| Pools | `autoenvscaling selfplay seed --pool-dir P --source tmax --no-copy D/*` |
-| Initial AutoEnvScaling pool | `autoenvscaling selfplay generate --parents-pool P --pool-dir Q --harness H --model M --assignments 256 [--no-solver-feedback]` |
-| Miles updates per run | `autoenvscaling selfplay schedule --steps S --mode static\|frontier` |
+| Pools | `aes seed --pool-dir P --source tmax --no-copy D/*` |
+| Initial AutoEnvScaling pool | `aes generate --parents-pool P --pool-dir Q --harness H --model M --assignments 256 [--no-solver-feedback]` |
+| Miles updates per run | `aes schedule --steps S --mode static\|frontier` |
 | Miles job | `autoenvscaling train plan\|run --preset exp2-<solver> --bridge-dir B --hf-checkpoint ... --ref-load ... --save ... --num-rollout N` |
-| Training loop | `autoenvscaling selfplay run --mode static\|frontier --pool-dir Q --run-dir R --bridge-dir B --steps S [--harness H --model M] [--no-solver-feedback]` |
+| Training loop | `aes run --mode static\|frontier --pool-dir Q --run-dir R --bridge-dir B --steps S [--harness H --model M] [--no-solver-feedback]` |
 | Evaluation | `cmd/evals/run.sh <served checkpoint> tb2.1` |
 
 ## Settings

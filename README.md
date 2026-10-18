@@ -91,8 +91,8 @@ autoenvscaling admit path/to/task
 Seed a pool and run one round of environment generation with a frontier proposer:
 
 ```bash
-autoenvscaling selfplay seed --pool-dir runs/pool path/to/seed/tasks/*
-autoenvscaling selfplay generate --pool-dir runs/pool --out-dir runs/round0 \
+aes seed --pool-dir runs/pool path/to/seed/tasks/*
+aes generate --pool-dir runs/pool --out-dir runs/round0 \
     --harness claude-code --model claude-opus-5 --assignments 8 \
     --solver-base-url $AES_SOLVER_BASE_URL --solver-model $AES_SOLVER_MODEL
 ```
