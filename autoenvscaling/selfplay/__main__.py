@@ -113,7 +113,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         train_proposer=not args.no_proposer_training,
                         proposer_harness=args.harness or ("pi" if args.mode == SHARED else ""),
                         proposer_model=args.model or "", solver_feedback=not args.no_solver_feedback,
-                        seed=args.seed,
+                        seed=args.seed, oversample_envs=args.oversample_envs,
                         solver_chat=_chat(args.solver_tools, args.solver_system_prompt),
                         proposer_chat=_chat(args.proposer_tools, args.proposer_system_prompt))
     if args.fixed_endpoint:
@@ -189,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-solver-feedback", action="store_true")
     p.add_argument("--no-proposer-training", action="store_true")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--oversample-envs", type=int, default=LoopConfig.oversample_envs,
+                   help="extra environments drawn per sampling wave, as spares for groups whose "
+                        "rewards do not vary")
     for role in ("solver", "proposer"):
         p.add_argument(f"--{role}-tools", type=Path,
                        help=f"JSON tool definitions the {role} harness sends (for re-tokenizing)")
