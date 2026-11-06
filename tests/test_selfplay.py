@@ -287,3 +287,24 @@ def test_cli_seed_prompts_schedule(tmp_path, capsys):
         main(["run", "--pool-dir", str(tmp_path / "pool"), "--run-dir", str(tmp_path / "run")])
     with pytest.raises(SystemExit):
         main(["run", "--mode", "frontier", "--pool-dir", "p", "--run-dir", "r", "--bridge-dir", "b"])
+
+
+def test_cli_run_oversample_envs(tmp_path, monkeypatch):
+    import autoenvscaling.selfplay.__main__ as selfplay
+
+    configs = []
+
+    class FakeLoop:
+        def __init__(self, settings, config, **kwargs):
+            configs.append(config)
+            self.schedule = type("S", (), {"planned_updates": 0})()
+
+        async def run(self):
+            return type("State", (), {"solver_steps": 0, "proposer_updates": 0})()
+
+    monkeypatch.setattr(selfplay, "SelfPlayLoop", FakeLoop)
+    run = ["run", "--mode", "static", "--pool-dir", str(tmp_path / "pool"),
+           "--run-dir", str(tmp_path / "run"), "--fixed-endpoint", "http://localhost:1/v1"]
+    assert selfplay.main(run) == 0
+    assert selfplay.main([*run, "--oversample-envs", "2"]) == 0
+    assert [c.oversample_envs for c in configs] == [LoopConfig.oversample_envs, 2]
